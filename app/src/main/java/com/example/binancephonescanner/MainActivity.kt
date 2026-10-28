@@ -20,44 +20,77 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import org.json.JSONArray
-import org.json.JSONObject
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 
 /**
- * Main screen of the auto-buy app: the auto-buy switch and its status on top, then the single
- * watch (conditions, scan progress, latest detections) and the trade log.
+ * Main screen of the auto-buy app, top to bottom:
+ *  1. the scan conditions (editable until START SCANNER, then fixed),
+ *  2. the auto-buy switch and its status,
+ *  3. a short auto-buy log (time + what happened; a red dot marks the latest purchases).
+ * The scan results and the scan log are only in the history screen ("기록 확인").
+ * The gear button (top right) holds the auto-buy settings, the API test and the background setting.
  */
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences(ScannerService.PREFS, MODE_PRIVATE) }
     private val handler = Handler(Looper.getMainLooper())
 
+    private val kst: TimeZone = TimeZone.getTimeZone("Asia/Seoul")
+    private val logTimeFormat by lazy { SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA).apply { timeZone = kst } }
+    private val logDayFormat by lazy { SimpleDateFormat("MM-dd", Locale.KOREA).apply { timeZone = kst } }
+
+    private val green = Color.rgb(120, 230, 90)
+    private val redDot = Color.rgb(255, 69, 69)
+    private val muted = Color.rgb(174, 194, 211)
+
     private lateinit var statusText: TextView
+
+    /** The views of the conditions card. */
+    private class ConditionPage {
+        lateinit var stateText: TextView
+        val chips = LinkedHashMap<String, TextView>()
+        var interval = "15m"
+        lateinit var volumeField: EditText
+        lateinit var highField: EditText
+        lateinit var liveField: EditText
+        lateinit var minutesField: EditText
+        lateinit var hoursField: EditText
+        lateinit var hoursCard: LinearLayout
+        lateinit var presetRow: LinearLayout
+        lateinit var fieldsContainer: LinearLayout
+        lateinit var toggleButton: Button
+        lateinit var infoText: TextView
+        lateinit var progressBar: ProgressBar
+        var locked = false
+    }
+
+    private val page = ConditionPage()
     private lateinit var autoStateText: TextView
+    private lateinit var progressPanel: LinearLayout
+    private lateinit var pctText: TextView
+    private lateinit var peakText: TextView
+    private lateinit var targetBar: ProgressBar
+    private lateinit var targetText: TextView
+    private lateinit var trailText: TextView
+    private lateinit var entriesText: TextView
+    private lateinit var updatedText: TextView
     private lateinit var autoToggle: Button
     private lateinit var liquidateButton: Button
-    private lateinit var watchStateText: TextView
-    private lateinit var conditionText: TextView
-    private lateinit var watchToggle: Button
-    private lateinit var progressText: TextView
-    private lateinit var progressBar: ProgressBar
-    private lateinit var summaryText: TextView
-    private lateinit var matchContainer: LinearLayout
-    private lateinit var logText: TextView
-    private var renderedMatchSignature = "__NOT_RENDERED__"
+    private lateinit var logContainer: LinearLayout
+    private var renderedLogSignature = "__NOT_RENDERED__"
 
     private val refreshTask = object : Runnable {
         override fun run() {
@@ -127,101 +160,330 @@ class MainActivity : ComponentActivity() {
     // ---- Screen ---------------------------------------------------------------------------
 
     private fun buildUi() {
-        val root = ScrollView(this).apply {
-            background = GradientDrawable(
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackground(GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 intArrayOf(Color.rgb(7, 13, 28), Color.rgb(15, 31, 49), Color.rgb(18, 20, 38))
-            )
+            ))
         }
-        setContentView(root)
+        // Attach early: if a later view fails to initialize, the activity won't stay blank.
+        setContentView(screen)
+
+        // Top bar: title + status on the left, gear button on the right.
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(28), dp(16), dp(8))
+        }
+        val titleColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titleColumn.addView(text("BINANCE AUTO BUY", 20f, Color.rgb(236, 249, 255), true))
+        statusText = text("상태 확인 중…", 13f, Color.WHITE, true)
+        titleColumn.addView(statusText, margin(0, 2, 0, 0))
+        top.addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
+        val gear = TextView(this).apply {
+            text = "⚙"
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(220, 236, 248))
+            background = rounded(Color.argb(110, 40, 64, 90), dp(14), Color.argb(110, 111, 161, 184))
+            setOnClickListener { showSettingsMenu() }
+        }
+        top.addView(gear, LinearLayout.LayoutParams(dp(46), dp(46)))
+        screen.addView(top, LinearLayout.LayoutParams(-1, -2))
+
+        val scroll = ScrollView(this)
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(28), dp(20), dp(40))
+            setPadding(dp(16), dp(4), dp(16), dp(40))
         }
-        root.addView(column)
+        scroll.addView(column)
+        screen.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        column.addView(text("BINANCE AUTO BUY", 21f, Color.rgb(236, 249, 255), true))
-        column.addView(text("USDT PERPETUAL  ·  LONG ONLY  ·  AUTO TRADING", 11f, Color.rgb(78, 232, 193), true), margin(0, 3, 0, 8))
-        statusText = text("상태 확인 중…", 14f, Color.WHITE, true)
-        column.addView(statusText, margin(0, 0, 0, 12))
+        column.addView(buildConditionsCard(), margin(0, 0, 0, 12))
+        column.addView(buildAutoCard(), margin(0, 0, 0, 12))
+        column.addView(buildLogCard())
+    }
 
-        // Auto-buy card
-        val autoCard = card()
-        autoCard.addView(text("자동매수", 18f, Color.WHITE, true))
-        autoStateText = text("", 13f, Color.rgb(197, 214, 229), false)
-        autoCard.addView(autoStateText, margin(0, 8, 0, 12))
-        val autoRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        autoToggle = button("자동매수 켜기", Color.rgb(0, 200, 137))
-        autoToggle.setOnClickListener { onAutoToggle() }
-        val autoSettings = button("자동매수 설정", Color.rgb(96, 82, 160))
-        autoSettings.setOnClickListener { showTradeSettingsDialog() }
-        autoRow.addView(autoToggle, LinearLayout.LayoutParams(0, dp(46), 3f))
-        autoRow.addView(autoSettings, LinearLayout.LayoutParams(0, dp(46), 2f).apply { marginStart = dp(8) })
-        autoCard.addView(autoRow, margin(0, 0, 0, 8))
-        val toolRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val testButton = button("API 연결 테스트", Color.rgb(38, 116, 180))
-        testButton.setOnClickListener { testConnection() }
-        liquidateButton = button("지금 전량 청산", Color.rgb(150, 60, 70))
-        liquidateButton.setOnClickListener { confirmLiquidate() }
-        toolRow.addView(testButton, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow.addView(liquidateButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8) })
-        autoCard.addView(toolRow)
-        column.addView(autoCard, margin(0, 0, 0, 12))
+    private fun buildConditionsCard(): LinearLayout {
+        val settings = card()
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(text("SETTINGS: CONDITIONS", 17f, Color.WHITE, true), LinearLayout.LayoutParams(0, -2, 1f))
+        page.stateText = text("○ 대기", 12f, Color.rgb(255, 190, 110), true)
+        head.addView(page.stateText)
+        settings.addView(head, margin(0, 0, 0, 10))
 
-        // Watch card
-        val watchCard = card()
-        watchCard.addView(text("감시", 18f, Color.WHITE, true))
-        watchStateText = text("○ 꺼짐", 15f, Color.rgb(255, 190, 110), true)
-        watchCard.addView(watchStateText, margin(0, 6, 0, 0))
-        conditionText = text("", 12f, Color.rgb(197, 214, 229), false)
-        watchCard.addView(conditionText, margin(0, 8, 0, 12))
-        progressText = text("검사 진행률 대기 중", 14f, Color.rgb(236, 249, 255), true)
-        watchCard.addView(progressText, margin(0, 0, 0, 7))
-        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        page.fieldsContainer = fields
+        settings.addView(fields)
+
+        // Timeframe chips
+        val timeframeBox = miniBox()
+        timeframeBox.addView(text("TIMEFRAME", 11f, muted, true))
+        val chipScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((key, _) in ScanOptions.INTERVALS) {
+            val chip = chip(key)
+            chip.setOnClickListener {
+                if (page.locked) {
+                    lockedToast()
+                } else {
+                    page.interval = key
+                    styleChips()
+                    applyIntervalDefaults()
+                }
+            }
+            page.chips[key] = chip
+            chipRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+        }
+        chipScroll.addView(chipRow)
+        timeframeBox.addView(chipScroll, margin(0, 6, 0, 0))
+        fields.addView(timeframeBox, margin(0, 0, 0, 8))
+
+        page.volumeField = inputBox(decimal = true, hintText = "4.5")
+        page.highField = inputBox(decimal = true, hintText = "5")
+        page.liveField = inputBox(decimal = true, hintText = "4")
+        page.minutesField = inputBox(decimal = false, hintText = "50")
+        page.hoursField = inputBox(decimal = false, hintText = "4, 8, 12")
+
+        val rowA = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rowA.addView(miniCard("VOLUME SPIKE (직전 봉 대비)", page.volumeField, "배"), LinearLayout.LayoutParams(0, -2, 1f))
+        rowA.addView(miniCard("고가 / 시가", page.highField, "%"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
+        fields.addView(rowA, margin(0, 0, 0, 8))
+
+        val rowB = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rowB.addView(miniCard("현재가 / 시가", page.liveField, "%"), LinearLayout.LayoutParams(0, -2, 1f))
+        rowB.addView(miniCard("검사 시각 (매시 N분)", page.minutesField, "분"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
+        fields.addView(rowB, margin(0, 0, 0, 8))
+
+        page.hoursCard = miniCard("검사 시각 (시, 한국 시간 · 비우면 매시간)", page.hoursField, "시")
+        fields.addView(page.hoursCard, margin(0, 0, 0, 6))
+        page.presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val closePreset = chip("마감 10분 전")
+        closePreset.background = rounded(Color.argb(80, 255, 255, 255), dp(20))
+        closePreset.setOnClickListener {
+            if (page.locked) {
+                lockedToast()
+            } else {
+                val preset = ScanOptions.closePreset(page.interval)
+                page.hoursField.setText(preset.first.joinToString(", "))
+                page.minutesField.setText(preset.second.toString())
+            }
+        }
+        val everyHour = chip("매시간")
+        everyHour.background = rounded(Color.argb(80, 255, 255, 255), dp(20))
+        everyHour.setOnClickListener {
+            if (page.locked) lockedToast() else page.hoursField.setText("")
+        }
+        page.presetRow.addView(closePreset, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+        page.presetRow.addView(everyHour)
+        fields.addView(page.presetRow, margin(0, 0, 0, 8))
+
+        fillFields(watch().config)
+
+        page.toggleButton = Button(this).apply {
+            text = "▶  START SCANNER"
+            textSize = 16f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            stateListAnimator = null
+            setOnClickListener { onWatchToggle() }
+        }
+        settings.addView(page.toggleButton, LinearLayout.LayoutParams(-1, dp(54)).apply { topMargin = dp(4) })
+
+        page.progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             progress = 0
             progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(34, 197, 145))
             progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 65, 83))
-            minimumHeight = dp(10)
         }
-        watchCard.addView(progressBar, LinearLayout.LayoutParams(-1, dp(10)).apply { bottomMargin = dp(12) })
-        val watchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        watchToggle = button("감시 시작", Color.rgb(0, 200, 137))
-        watchToggle.setOnClickListener { toggleWatch() }
-        val history = button("기록 확인", Color.rgb(38, 116, 180))
-        history.setOnClickListener {
-            startActivity(Intent(this, HistoryActivity::class.java).apply {
-                putExtra(ScannerService.EXTRA_WATCH_ID, watch().id)
-            })
+        settings.addView(page.progressBar, LinearLayout.LayoutParams(-1, dp(6)).apply { topMargin = dp(10) })
+        page.infoText = text("", 11.5f, muted, false)
+        settings.addView(page.infoText, margin(0, 6, 0, 0))
+        return settings
+    }
+
+    private fun buildAutoCard(): LinearLayout {
+        val autoCard = card()
+        autoCard.addView(text("AUTO BUY", 17f, Color.WHITE, true))
+        autoStateText = text("", 12.5f, Color.rgb(197, 214, 229), false)
+        autoCard.addView(autoStateText, margin(0, 8, 0, 8))
+
+        // Progress panel: shown while there are purchases in the running session.
+        progressPanel = miniBox()
+        progressPanel.visibility = View.GONE
+        val pctRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
         }
-        watchRow.addView(watchToggle, LinearLayout.LayoutParams(0, dp(46), 3f))
-        watchRow.addView(history, LinearLayout.LayoutParams(0, dp(46), 2f).apply { marginStart = dp(8) })
-        watchCard.addView(watchRow, margin(0, 0, 0, 8))
-        val settings = button("조건 · 시간 설정", Color.rgb(96, 82, 160))
-        settings.setOnClickListener { showSettingsDialog() }
-        watchCard.addView(settings, LinearLayout.LayoutParams(-1, dp(44)))
-        column.addView(watchCard, margin(0, 0, 0, 12))
+        val pctColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pctColumn.addView(text("현재 수익률 (원금 대비)", 11f, muted, true))
+        pctText = mono("+0.00%", 30f, green, true, singleLine = true)
+        pctColumn.addView(pctText)
+        pctRow.addView(pctColumn, LinearLayout.LayoutParams(0, -2, 1f))
+        peakText = mono("", 13f, muted, false, singleLine = true)
+        pctRow.addView(peakText)
+        progressPanel.addView(pctRow)
+        targetBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(34, 197, 145))
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 65, 83))
+        }
+        progressPanel.addView(targetBar, LinearLayout.LayoutParams(-1, dp(6)).apply { topMargin = dp(10) })
+        targetText = text("", 12f, muted, false)
+        progressPanel.addView(targetText, margin(0, 6, 0, 0))
+        trailText = text("", 13f, Color.WHITE, true)
+        progressPanel.addView(trailText, margin(0, 8, 0, 0))
+        entriesText = mono("", 12f, Color.rgb(197, 214, 229), false, singleLine = false)
+        progressPanel.addView(entriesText, margin(0, 10, 0, 0))
+        updatedText = text("", 11f, muted, false)
+        progressPanel.addView(updatedText, margin(0, 8, 0, 0))
+        autoCard.addView(progressPanel, margin(0, 0, 0, 12))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        autoToggle = button("자동매수 켜기", Color.rgb(0, 200, 137))
+        autoToggle.setOnClickListener { onAutoToggle() }
+        liquidateButton = button("전량 청산", Color.rgb(150, 60, 70))
+        liquidateButton.setOnClickListener { confirmLiquidate() }
+        row.addView(autoToggle, LinearLayout.LayoutParams(0, dp(48), 3f))
+        row.addView(liquidateButton, LinearLayout.LayoutParams(0, dp(48), 2f).apply { marginStart = dp(8) })
+        autoCard.addView(row)
+        return autoCard
+    }
 
-        // Latest result card
-        val resultCard = card()
-        resultCard.addView(text("최근 검사 결과", 16f, Color.WHITE, true))
-        summaryText = text("아직 검사 기록이 없습니다.", 13f, Color.rgb(197, 214, 229), false)
-        resultCard.addView(summaryText, margin(0, 8, 0, 14))
-        resultCard.addView(text("감지 종목", 15f, Color.WHITE, true))
-        matchContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        resultCard.addView(matchContainer, margin(0, 8, 0, 0))
-        column.addView(resultCard, margin(0, 0, 0, 12))
-
-        // Trade log card
+    private fun buildLogCard(): LinearLayout {
         val logCard = card()
-        logCard.addView(text("자동매수 기록 (최근 순)", 16f, Color.WHITE, true))
-        logText = text("아직 기록이 없습니다.", 12f, Color.rgb(197, 214, 229), false)
-        logCard.addView(logText, margin(0, 8, 0, 0))
-        column.addView(logCard, margin(0, 0, 0, 12))
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(text("AUTO BUY LOG", 17f, Color.WHITE, true), LinearLayout.LayoutParams(0, -2, 1f))
+        val historyButton = Button(this).apply {
+            text = "기록 확인"
+            textSize = 12f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = rounded(Color.argb(130, 38, 116, 180), dp(12), Color.argb(120, 150, 200, 230))
+            stateListAnimator = null
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, HistoryActivity::class.java).apply {
+                    putExtra(ScannerService.EXTRA_WATCH_ID, watch().id)
+                })
+            }
+        }
+        head.addView(historyButton, LinearLayout.LayoutParams(-2, dp(38)))
+        logCard.addView(head, margin(0, 0, 0, 8))
+        logContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        logCard.addView(logContainer)
+        return logCard
+    }
 
-        val battery = button("백그라운드 유지 설정", Color.rgb(38, 116, 180))
-        battery.setOnClickListener { openBatterySettings() }
-        column.addView(battery, LinearLayout.LayoutParams(-1, dp(44)))
+    // ---- Condition fields ------------------------------------------------------------------
+
+    private fun chip(label: String): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        setPadding(dp(14), dp(7), dp(14), dp(7))
+    }
+
+    private fun styleChips() {
+        for ((key, view) in page.chips) {
+            val selected = key == page.interval
+            view.background = rounded(
+                if (selected) Color.argb(210, 110, 160, 195) else Color.argb(60, 255, 255, 255), dp(20)
+            )
+            view.setTextColor(if (selected) Color.rgb(8, 20, 34) else Color.WHITE)
+            view.typeface = Typeface.create("sans-serif", if (selected) Typeface.BOLD else Typeface.NORMAL)
+        }
+    }
+
+    private fun updateHoursVisibility() {
+        val hourly = ScanOptions.isHourly(page.interval)
+        page.hoursCard.visibility = if (hourly) View.VISIBLE else View.GONE
+        page.presetRow.visibility = if (hourly) View.VISIBLE else View.GONE
+    }
+
+    /** When the candle size changes: 4h or longer gets the "10 minutes before close" schedule. */
+    private fun applyIntervalDefaults() {
+        updateHoursVisibility()
+        if (ScanOptions.isHourly(page.interval)) {
+            val preset = ScanOptions.closePreset(page.interval)
+            page.hoursField.setText(preset.first.joinToString(", "))
+            page.minutesField.setText(preset.second.toString())
+        } else {
+            page.hoursField.setText("")
+        }
+    }
+
+    private fun fillFields(config: ScanConfig) {
+        page.interval = config.interval
+        page.volumeField.setText(formatNumber(config.volumeMultiple))
+        page.highField.setText(formatNumber(config.highPct))
+        page.liveField.setText(formatNumber(config.livePct))
+        page.minutesField.setText(config.minutes.joinToString(", "))
+        page.hoursField.setText(config.hours.joinToString(", "))
+        styleChips()
+        updateHoursVisibility()
+    }
+
+    /** Locks (or unlocks) the condition fields: while the scanner runs they cannot change. */
+    private fun setLocked(locked: Boolean) {
+        page.locked = locked
+        listOf(page.volumeField, page.highField, page.liveField, page.minutesField, page.hoursField)
+            .forEach { it.isEnabled = !locked }
+        page.fieldsContainer.alpha = if (locked) 0.6f else 1f
+    }
+
+    private fun lockedToast() {
+        Toast.makeText(this, "감시 중에는 조건이 고정됩니다. 바꾸려면 먼저 중지하세요.", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Reads and checks the fields. Null (with a message) if something is wrong. */
+    private fun readConfig(): ScanConfig? {
+        val high = page.highField.text.toString().trim().toDoubleOrNull()
+        val live = page.liveField.text.toString().trim().toDoubleOrNull()
+        val volume = page.volumeField.text.toString().trim().toDoubleOrNull()
+        val minutes = ScanOptions.parseMinutes(page.minutesField.text.toString())
+        val hourly = ScanOptions.isHourly(page.interval)
+        val hours = if (hourly) ScanOptions.parseHours(page.hoursField.text.toString()) else emptyList()
+        val problem = when {
+            volume == null || volume <= 0.0 -> "거래량 배수는 0보다 큰 숫자로 입력하세요."
+            high == null || high < 0.0 -> "고가 상승률은 0 이상의 숫자로 입력하세요."
+            live == null || live < 0.0 -> "현재가 상승률은 0 이상의 숫자로 입력하세요."
+            minutes == null -> "검사 분은 0~59 사이의 숫자를 쉼표로 구분해 입력하세요."
+            hours == null -> "검사 시는 0~23 사이의 숫자를 쉼표로 구분해 입력하세요."
+            else -> null
+        }
+        if (problem != null || high == null || live == null || volume == null || minutes == null || hours == null) {
+            Toast.makeText(this, problem ?: "입력값을 확인하세요.", Toast.LENGTH_LONG).show()
+            return null
+        }
+        return ScanConfig(page.interval, minutes, high, live, volume, hours)
+    }
+
+    /** START SCANNER: saves the conditions (they are then fixed) and starts. STOP: stops and unlocks. */
+    private fun onWatchToggle() {
+        val w = watch()
+        val enabled = prefs.getBoolean(w.key("enabled"), false)
+        if (enabled && TradeSettings.load(this).autoBuy) {
+            Toast.makeText(this, "자동매수가 켜져 있는 동안은 감시를 끌 수 없습니다. 먼저 자동매수를 끄세요.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!enabled) {
+            val config = readConfig() ?: return
+            WatchStore.updateConfig(this, w.id, config)
+            setLocked(true)
+        }
+        sendService(if (enabled) ScannerService.ACTION_STOP else ScannerService.ACTION_START, w.id)
+        page.stateText.text = if (enabled) "◷ 중지 요청 중…" else "◷ 시작 요청 중…"
+        page.stateText.setTextColor(Color.rgb(255, 214, 102))
+        afterAction()
     }
 
     // ---- Refresh --------------------------------------------------------------------------
@@ -237,6 +499,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun shortTime(value: String): String =
+        if (value.length >= 19 && value[4] == '-') value.substring(5, 19) else value
+
     private fun refreshData() {
         val w = watch()
         val config = TradeSettings.load(this)
@@ -249,83 +514,195 @@ class MainActivity : ComponentActivity() {
         }
         statusText.setTextColor(if (config.autoBuy || watchOn) Color.rgb(80, 238, 180) else Color.rgb(255, 190, 110))
 
-        autoStateText.text = TradeEngine.statusText(this)
-        autoToggle.text = if (config.autoBuy) "자동매수 끄기" else "자동매수 켜기"
-        autoToggle.background = rounded(if (config.autoBuy) Color.rgb(68, 82, 105) else Color.rgb(0, 200, 137), dp(13))
-        liquidateButton.alpha = if (TradeEngine.hasOpenSession(this)) 1f else 0.5f
-
+        // Conditions: while the watch runs, the fields show the fixed conditions.
         val sc = w.config
-        watchStateText.text = if (watchOn) "● 실행 중 · ${sc.label}" else "○ 꺼짐 · ${sc.label}"
-        watchStateText.setTextColor(if (watchOn) Color.rgb(80, 238, 180) else Color.rgb(255, 190, 110))
-        conditionText.text = sc.conditionText() +
-            "\n• 검사 시각: ${sc.scheduleText()} (한국 시간)\n※ 아직 마감되지 않은 봉 기준입니다."
-        watchToggle.text = if (watchOn) "감시 중지" else "감시 시작"
-        watchToggle.background = rounded(if (watchOn) Color.rgb(68, 82, 105) else Color.rgb(0, 200, 137), dp(13))
+        if (watchOn) fillFields(sc)
+        if (watchOn != page.locked) setLocked(watchOn)
+        page.stateText.text = if (watchOn) "● 실행 중 · 조건 고정" else "○ 대기 중 · 수정 가능"
+        page.stateText.setTextColor(if (watchOn) Color.rgb(80, 238, 180) else Color.rgb(255, 190, 110))
+        page.toggleButton.text = if (watchOn) "■  STOP SCANNER" else "▶  START SCANNER"
+        page.toggleButton.background = if (watchOn) {
+            rounded(Color.argb(190, 150, 60, 70), dp(16), Color.argb(150, 255, 150, 160))
+        } else {
+            rounded(Color.argb(150, 110, 130, 150), dp(16), Color.argb(150, 200, 225, 245))
+        }
+        page.toggleButton.alpha = if (watchOn && config.autoBuy) 0.5f else 1f
 
         val done = prefs.getInt(w.key("scan_progress_done"), 0)
         val total = prefs.getInt(w.key("scan_progress_total"), 0)
         val percent = prefs.getInt(w.key("scan_progress_percent"), 0).coerceIn(0, 100)
         val scanning = prefs.getBoolean(w.key("scan_in_progress"), false)
-        progressText.text = if (total > 0) {
-            "${if (scanning) "검사 중" else "검사 진행률"}  $done / $total · $percent%"
-        } else {
-            "검사 진행률 대기 중"
-        }
-        progressBar.progress = percent
-
-        val last = prefs.getString(w.key("last_scan_time"), "없음") ?: "없음"
-        val scanned = prefs.getInt(w.key("last_scanned"), 0)
+        page.progressBar.progress = if (watchOn) percent else 0
+        val last = prefs.getString(w.key("last_scan_time"), "") ?: ""
         val matchesCount = prefs.getInt(w.key("last_match_count"), 0)
-        val failures = prefs.getInt(w.key("last_failures"), 0)
-        val next = prefs.getString(w.key("next_scan"), "감시 시작 후 표시") ?: "감시 시작 후 표시"
-        val outcome = prefs.getString(w.key("last_outcome"), "대기 중") ?: "대기 중"
-        summaryText.text = "최근 검사: $last\n검사 종목: ${scanned}개\n조건 충족: ${matchesCount}개\n요청 실패/시간 초과: ${failures}개\n결과: $outcome\n다음 검사: $next"
+        val next = prefs.getString(w.key("next_scan"), "") ?: ""
+        page.infoText.text = when {
+            !watchOn -> "시작하면 위 조건으로 고정되어 감시합니다.\n검사 시각: ${sc.scheduleText()} (한국 시간) · 마감 전 봉 기준"
+            scanning && total > 0 -> "검사 중  $done / $total · $percent%"
+            else -> "검사 시각: ${sc.scheduleText()}\n최근 ${if (last.isBlank()) "없음" else shortTime(last)} · 감지 ${matchesCount}개\n다음 ${shortTime(next)}"
+        }
 
-        val lines = TradeEngine.logLines(this)
-        logText.text = if (lines.isEmpty()) "아직 기록이 없습니다." else lines.takeLast(15).reversed().joinToString("\n")
+        // Auto-buy
+        val progress = TradeEngine.progress(this)
+        if (progress != null && progress.entries.isNotEmpty()) {
+            autoStateText.text = progressHeadline(progress, config)
+            showProgress(progress)
+            progressPanel.visibility = View.VISIBLE
+        } else {
+            autoStateText.text = TradeEngine.statusText(this)
+            progressPanel.visibility = View.GONE
+        }
+        autoToggle.text = if (config.autoBuy) "자동매수 끄기" else "자동매수 켜기"
+        autoToggle.background = rounded(
+            if (config.autoBuy) Color.argb(190, 68, 82, 105) else Color.rgb(0, 170, 125), dp(14)
+        )
+        liquidateButton.alpha = if (TradeEngine.hasOpenSession(this)) 1f else 0.5f
 
-        renderMatches(w)
+        refreshLog()
     }
 
-    private fun renderMatches(w: Watch) {
-        val matches = try {
-            JSONArray(prefs.getString(w.key("last_matches"), "[]") ?: "[]")
-        } catch (_: Exception) {
-            JSONArray()
+    private fun pctLabel(value: Double): String =
+        (if (value >= 0) "+" else "") + String.format(Locale.US, "%.2f", value) + "%"
+
+    private fun progressHeadline(p: TradeEngine.Progress, config: TradeConfig): String {
+        val head = when (p.phase) {
+            TradeEngine.Phase.ACTIVE -> "진행 중 · 진입 ${p.entries.size}/${p.maxSlots} · 종목당 ${String.format(Locale.US, "%.2f", p.slotUsdt)} USDT"
+            TradeEngine.Phase.LIQUIDATING -> "전량 청산 진행 중 · ${p.reason}"
+            TradeEngine.Phase.ENDED -> "오늘 종료 · ${p.reason}"
         }
-        val signature = (0 until matches.length()).joinToString("|") { i ->
-            val m = matches.optJSONObject(i) ?: JSONObject()
-            "${m.optString("symbol")}:${m.optDouble("changePct")}:${m.optDouble("volumeMultiple")}"
+        return head + "\n원금 ${String.format(Locale.US, "%.2f", p.startEquity)} USDT · 운용 시간 ${config.windowText()}"
+    }
+
+    private fun showProgress(p: TradeEngine.Progress) {
+        pctText.text = pctLabel(p.pct)
+        pctText.setTextColor(if (p.pct >= 0) green else Color.rgb(255, 99, 99))
+        peakText.text = "최고 ${pctLabel(p.peakPct)}"
+
+        // Target
+        val target = p.targetPct
+        targetBar.progress = if (target > 0.0) (p.pct / target * 100.0).toInt().coerceIn(0, 100) else 0
+        val remain = target - p.pct
+        targetText.text = if (remain > 0.0) {
+            "목표 ${pctLabel(target)} · 남은 ${String.format(Locale.US, "%.2f", remain)}%p"
+        } else {
+            "목표 ${pctLabel(target)} 도달"
         }
-        if (signature == renderedMatchSignature) return
-        renderedMatchSignature = signature
-        matchContainer.removeAllViews()
-        if (matches.length() == 0) {
-            matchContainer.addView(text("조건 충족 종목 없음 (최근 검사 기준)", 13f, Color.rgb(174, 194, 211), false))
+
+        // Trailing (protection) line
+        when (p.trailMode) {
+            0 -> {
+                trailText.text = "보호선  사용 안 함"
+                trailText.setTextColor(muted)
+            }
+            1 -> {
+                trailText.text = "보호선  ○ 대기 중 · 최고 ${pctLabel(p.peakPct)} / 시작 ${pctLabel(p.trailStartPct)}\n" +
+                    "       (최고 수익이 ${pctLabel(p.trailStartPct)}를 넘으면 작동)"
+                trailText.setTextColor(Color.rgb(255, 190, 110))
+            }
+            else -> {
+                val room = p.pct - p.trailLine
+                trailText.text = "보호선  ● 작동 중 · 청산선 ${pctLabel(p.trailLine)}\n" +
+                    "       현재 여유 ${String.format(Locale.US, "%.2f", room)}%p (하락 폭 ${String.format(Locale.US, "%.2f", p.trailDropPct)}%p)"
+                trailText.setTextColor(if (room <= p.trailDropPct * 0.3) Color.rgb(255, 99, 99) else green)
+            }
+        }
+
+        // Purchases
+        entriesText.text = p.entries.joinToString("\n") { e ->
+            val name = e.symbol.removeSuffix("USDT") + "/USDT"
+            "• $name  진입 ${trimPrice(e.entryPrice)}  손절 ${trimPrice(e.stopPrice)}"
+        }
+        updatedText.text = if (p.updatedAt > 0L) {
+            "수익률 갱신 ${logTimeFormat.format(java.util.Date(p.updatedAt)).substring(6)} · 약 10초마다 확인"
+        } else {
+            "수익률 확인 대기 중"
+        }
+    }
+
+    private fun trimPrice(value: Double): String =
+        java.math.BigDecimal(value.toString()).stripTrailingZeros().toPlainString()
+
+    // ---- Auto-buy log (short) ----------------------------------------------------------------
+
+    private val buyPattern = Regex("^(\\S+) 매수 체결 · 수량 \\S+ · 진입 (\\S+) · 손절 (\\S+) · (\\d+/\\d+)")
+
+    private fun logMillis(timePart: String): Long =
+        try { logTimeFormat.parse(timePart)?.time ?: 0L } catch (_: Exception) { 0L }
+
+    private fun refreshLog() {
+        val lines = TradeEngine.logLines(this).takeLast(30).reversed()
+        val signature = lines.joinToString("\n")
+        if (signature == renderedLogSignature) return
+        renderedLogSignature = signature
+        logContainer.removeAllViews()
+        if (lines.isEmpty()) {
+            logContainer.addView(text("아직 자동매수 기록이 없습니다.", 13f, muted, false))
             return
         }
-        for (i in 0 until matches.length()) {
-            val item = matches.optJSONObject(i) ?: continue
-            val symbol = item.optString("symbol")
-            val price = item.optDouble("price")
-            val highPct = item.optDouble("highPct")
-            val changePct = item.optDouble("changePct")
-            val volumeMultiple = item.optDouble("volumeMultiple")
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-                background = rounded(Color.argb(110, 30, 52, 73), dp(14))
-            }
-            row.addView(text(symbol, 17f, Color.rgb(91, 235, 194), true))
-            row.addView(text(
-                "현재가 ${formatPrice(price)}\n고가/시가 +${"%.2f".format(Locale.US, highPct)}%  ·  현재가/시가 +${"%.2f".format(Locale.US, changePct)}%\n거래량 ${"%.2f".format(Locale.US, volumeMultiple)}배",
-                12f, Color.rgb(213, 227, 239), false
-            ), margin(0, 5, 0, 8))
-            val copy = button("종목명 복사", Color.rgb(0, 142, 116))
-            copy.setOnClickListener { copySymbol(symbol) }
-            row.addView(copy, LinearLayout.LayoutParams(-1, dp(42)))
-            matchContainer.addView(row, margin(0, 0, 0, 8))
+        val parsed = lines.map { line ->
+            val parts = line.split(" | ", limit = 2)
+            if (parts.size == 2) parts[0] to parts[1] else "" to line
         }
+        // Red dot: the latest purchases (buys within 5 minutes of the newest buy).
+        val newestBuy = parsed.firstOrNull { it.second.contains("매수 체결") }?.let { logMillis(it.first) } ?: 0L
+        val today = logDayFormat.format(java.util.Date())
+        for ((timePart, message) in parsed) {
+            val isBuy = message.contains("매수 체결")
+            val dot = isBuy && newestBuy > 0L && newestBuy - logMillis(timePart) <= 5 * 60_000L
+            val timeLabel = when {
+                timePart.length < 14 -> timePart
+                timePart.startsWith(today) -> timePart.substring(6)
+                else -> timePart.substring(0, 11)
+            }
+            logContainer.addView(logRow(timeLabel, message, dot))
+        }
+    }
+
+    private fun logRow(timeLabel: String, message: String, dot: Boolean): View {
+        val wrapper = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(10), dp(4), dp(10))
+        }
+        val dotView = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(redDot)
+            }
+            visibility = if (dot) View.VISIBLE else View.INVISIBLE
+        }
+        row.addView(dotView, LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginEnd = dp(8) })
+        row.addView(mono(timeLabel, 12.5f, Color.rgb(150, 168, 184), false, singleLine = true), LinearLayout.LayoutParams(dp(92), -2))
+
+        val buy = buyPattern.find(message)
+        val shown: String
+        val color: Int
+        if (buy != null) {
+            val name = buy.groupValues[1].removeSuffix("USDT") + "/USDT"
+            shown = "$name  매수 @${buy.groupValues[2]}\n손절 ${buy.groupValues[3]} · ${buy.groupValues[4]}"
+            color = green
+        } else {
+            shown = message
+            color = when {
+                message.contains("긴급") || message.contains("실패") || message.contains("오류") -> Color.rgb(255, 99, 99)
+                message.contains("청산") || message.contains("종료") -> Color.rgb(255, 190, 110)
+                message.contains("건너뜀") -> Color.rgb(150, 168, 184)
+                else -> Color.WHITE
+            }
+        }
+        row.addView(mono(shown, 13f, color, buy != null, singleLine = false), LinearLayout.LayoutParams(0, -2, 1f))
+        wrapper.addView(row)
+        wrapper.addView(View(this).apply { setBackgroundColor(Color.argb(40, 255, 255, 255)) }, LinearLayout.LayoutParams(-1, 1))
+        return wrapper
+    }
+
+    private fun mono(value: String, size: Float, color: Int, bold: Boolean, singleLine: Boolean): TextView = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+        typeface = Typeface.create("monospace", if (bold) Typeface.BOLD else Typeface.NORMAL)
+        if (singleLine) setSingleLine(true)
     }
 
     // ---- Actions --------------------------------------------------------------------------
@@ -347,18 +724,20 @@ class MainActivity : ComponentActivity() {
         handler.postDelayed({ safeRefreshData() }, 4000)
     }
 
-    private fun toggleWatch() {
-        val w = watch()
-        val config = TradeSettings.load(this)
-        if (config.autoBuy) {
-            Toast.makeText(this, "자동매수가 켜져 있는 동안은 감시를 끌 수 없습니다. 먼저 자동매수를 끄세요.", Toast.LENGTH_LONG).show()
-            return
-        }
-        val enabled = prefs.getBoolean(w.key("enabled"), false)
-        sendService(if (enabled) ScannerService.ACTION_STOP else ScannerService.ACTION_START, w.id)
-        watchStateText.text = if (enabled) "◷ 중지 요청 중…" else "◷ 시작 요청 중…"
-        watchStateText.setTextColor(Color.rgb(255, 214, 102))
-        afterAction()
+    /** The gear button: auto-buy settings, API test, background setting. */
+    private fun showSettingsMenu() {
+        val items = arrayOf("자동매수 설정 (API 키 · 시간 · 금액)", "API 연결 테스트", "백그라운드 유지 설정")
+        AlertDialog.Builder(this)
+            .setTitle("설정")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showTradeSettingsDialog()
+                    1 -> testConnection()
+                    2 -> openBatterySettings()
+                }
+            }
+            .setNegativeButton("닫기", null)
+            .show()
     }
 
     private fun onAutoToggle() {
@@ -396,6 +775,12 @@ class MainActivity : ComponentActivity() {
             .setMessage(message)
             .setNegativeButton("취소", null)
             .setPositiveButton("켜기") { _, _ ->
+                // Conditions that were typed but not started yet are saved (and then fixed).
+                if (!page.locked) {
+                    val cfg = readConfig() ?: return@setPositiveButton
+                    WatchStore.updateConfig(this, watch().id, cfg)
+                    setLocked(true)
+                }
                 TradeSettings.setAutoBuy(this, true)
                 sendService(ScannerService.ACTION_START, watch().id)
                 afterAction()
@@ -653,110 +1038,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** The scan conditions of the watch: candle size, thresholds and scan minutes. */
-    private fun showSettingsDialog() {
-        val w = watch()
-        val current = w.config
-
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(10), dp(22), dp(4))
-        }
-
-        val intervalKeys = ScanOptions.INTERVALS.keys.toList()
-        val intervalSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                ScanOptions.INTERVALS.values.toList()
-            )
-            setSelection(intervalKeys.indexOf(current.interval).coerceAtLeast(0))
-        }
-        column.addView(caption("봉 종류 (타임프레임)"))
-        column.addView(intervalSpinner)
-
-        val highField = numberField(formatNumber(current.highPct), "예: 5")
-        column.addView(caption("고가가 시가 대비 몇 % 이상 오른 적이 있는가 (%)"))
-        column.addView(highField)
-
-        val liveField = numberField(formatNumber(current.livePct), "예: 4")
-        column.addView(caption("현재가가 시가 대비 몇 % 이상 올라 있는가 (%)"))
-        column.addView(liveField)
-
-        val volumeField = numberField(formatNumber(current.volumeMultiple), "예: 4.5")
-        column.addView(caption("거래량이 직전 완료봉의 몇 배 이상인가 (배)"))
-        column.addView(volumeField)
-
-        val minutesField = EditText(this).apply {
-            setText(current.minutes.joinToString(", "))
-            hint = "예: 50  또는  0, 15, 30, 45"
-            inputType = InputType.TYPE_CLASS_TEXT
-            setSingleLine(true)
-        }
-        column.addView(caption("검사할 시각: 매시 몇 분에 검사할까요 (0~59, 쉼표로 여러 개, 한국 시간)"))
-        column.addView(minutesField)
-
-        val presets = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun preset(label: String, minutes: String) {
-            val chip = Button(this).apply {
-                text = label
-                textSize = 12f
-                isAllCaps = false
-                setOnClickListener { minutesField.setText(minutes) }
-            }
-            presets.addView(chip, LinearLayout.LayoutParams(0, dp(40), 1f))
-        }
-        preset("정각", "0")
-        preset("50분", "50")
-        preset("59분", "59")
-        preset("15분마다", "0, 15, 30, 45")
-        column.addView(presets)
-        column.addView(TextView(this).apply {
-            text = "매시 지정한 분의 5초에 검사합니다. 봉이 마감되기 전 시각으로 정하면 진행 중인 봉을 검사합니다. 변경한 값은 다음 검사부터 적용됩니다."
-            textSize = 12f
-            setPadding(0, dp(10), 0, dp(6))
-        })
-
-        val scroll = ScrollView(this).apply { addView(column) }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("조건 · 시간 설정")
-            .setView(scroll)
-            .setNegativeButton("취소", null)
-            .setPositiveButton("저장", null)
-            .create()
-        dialog.show()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val high = highField.text.toString().trim().toDoubleOrNull()
-            val live = liveField.text.toString().trim().toDoubleOrNull()
-            val volume = volumeField.text.toString().trim().toDoubleOrNull()
-            val minutes = ScanOptions.parseMinutes(minutesField.text.toString())
-            val problem = when {
-                high == null || high < 0.0 -> "고가 상승률은 0 이상의 숫자로 입력하세요."
-                live == null || live < 0.0 -> "현재가 상승률은 0 이상의 숫자로 입력하세요."
-                volume == null || volume <= 0.0 -> "거래량 배수는 0보다 큰 숫자로 입력하세요."
-                minutes == null -> "검사 시각은 0~59 사이의 숫자를 쉼표로 구분해 입력하세요."
-                else -> null
-            }
-            if (problem != null || high == null || live == null || volume == null || minutes == null) {
-                Toast.makeText(this, problem ?: "입력값을 확인하세요.", Toast.LENGTH_LONG).show()
-            } else {
-                val interval = intervalKeys[intervalSpinner.selectedItemPosition.coerceIn(0, intervalKeys.size - 1)]
-                WatchStore.updateConfig(this, w.id, ScanConfig(interval, minutes, high, live, volume))
-                if (prefs.getBoolean(w.key("enabled"), false)) {
-                    sendService(ScannerService.ACTION_START, w.id)
-                }
-                Toast.makeText(this, "저장했습니다. 다음 검사부터 적용됩니다.", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-                handler.postDelayed({ safeRefreshData() }, 800)
-            }
-        }
-    }
-
     // ---- View helpers ---------------------------------------------------------------------
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), dp(16), dp(16), dp(16))
         background = rounded(Color.argb(125, 25, 42, 62), dp(20), Color.argb(110, 111, 161, 184))
+    }
+
+    private fun miniBox(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = rounded(Color.argb(70, 20, 36, 56), dp(14), Color.argb(90, 111, 161, 184))
+    }
+
+    private fun inputBox(decimal: Boolean, hintText: String): EditText = EditText(this).apply {
+        hint = hintText
+        inputType = if (decimal) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_TEXT
+        setSingleLine(true)
+        textSize = 17f
+        setTextColor(Color.WHITE)
+        setHintTextColor(Color.argb(110, 255, 255, 255))
+        background = null
+        setPadding(0, dp(4), 0, dp(4))
+    }
+
+    private fun miniCard(caption: String, edit: EditText, suffix: String): LinearLayout {
+        val box = miniBox()
+        box.addView(text(caption, 11f, muted, true))
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        line.addView(edit, LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(text(suffix, 14f, muted, false))
+        box.addView(line)
+        return box
     }
 
     private fun text(value: String, size: Float, color: Int, bold: Boolean): TextView = TextView(this).apply {
@@ -789,10 +1106,6 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun formatPrice(value: Double): String =
-        if (value >= 1000) "%,.3f".format(Locale.US, value)
-        else "%.8f".format(Locale.US, value).trimEnd('0').trimEnd('.')
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 &&

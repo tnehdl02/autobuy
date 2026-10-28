@@ -43,6 +43,7 @@ object TradeEngine {
         var slotUsdt = 0.0
         var peakPct = 0.0
         var lastPct = 0.0
+        var updatedAt = 0L
         var hedge = false
         val entries = ArrayList<TradeEntry>()
     }
@@ -79,6 +80,7 @@ object TradeEngine {
             s.slotUsdt = o.optDouble("slotUsdt", 0.0)
             s.peakPct = o.optDouble("peakPct", 0.0)
             s.lastPct = o.optDouble("lastPct", 0.0)
+            s.updatedAt = o.optLong("updatedAt", 0L)
             s.hedge = o.optBoolean("hedge", false)
             val array = o.optJSONArray("entries") ?: JSONArray()
             for (i in 0 until array.length()) {
@@ -110,6 +112,7 @@ object TradeEngine {
         o.put("slotUsdt", s.slotUsdt)
         o.put("peakPct", s.peakPct)
         o.put("lastPct", s.lastPct)
+        o.put("updatedAt", s.updatedAt)
         o.put("hedge", s.hedge)
         val array = JSONArray()
         for (e in s.entries) {
@@ -317,6 +320,7 @@ object TradeEngine {
         if (s.startEquity <= 0.0) return
         val pct = (equity - s.startEquity) / s.startEquity * 100.0
         s.lastPct = pct
+        s.updatedAt = System.currentTimeMillis()
         if (pct > s.peakPct) s.peakPct = pct
         saveState(context, s)
 
@@ -560,6 +564,43 @@ object TradeEngine {
             }
         }
         return head.toString()
+    }
+
+    /** What the screen shows while auto-buy is running: profit, target and trailing line. */
+    class Progress(
+        val phase: Phase,
+        val reason: String,
+        val maxSlots: Int,
+        val startEquity: Double,
+        val slotUsdt: Double,
+        val pct: Double,
+        val peakPct: Double,
+        val updatedAt: Long,
+        val targetPct: Double,
+        val trailStartPct: Double,
+        val trailDropPct: Double,
+        val entries: List<TradeEntry>
+    ) {
+        /** 0 = not used, 1 = waiting (peak below the start), 2 = armed (working). */
+        val trailMode: Int
+            get() = when {
+                trailStartPct <= 0.0 -> 0
+                peakPct >= trailStartPct -> 2
+                else -> 1
+            }
+
+        /** When armed: the total profit at or below which everything is sold. */
+        val trailLine: Double get() = peakPct - trailDropPct
+    }
+
+    fun progress(context: Context): Progress? {
+        val config = TradeSettings.load(context)
+        if (!config.autoBuy) return null
+        val s = loadState(context) ?: return null
+        return Progress(
+            s.phase, s.reason, config.maxSlots, s.startEquity, s.slotUsdt, s.lastPct, s.peakPct,
+            s.updatedAt, config.targetPct, config.trailStartPct, config.trailDropPct, s.entries.toList()
+        )
     }
 
     fun hasOpenSession(context: Context): Boolean {

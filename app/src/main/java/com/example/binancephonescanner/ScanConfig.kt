@@ -20,7 +20,9 @@ data class ScanConfig(
     val minutes: List<Int>,
     val highPct: Double,
     val livePct: Double,
-    val volumeMultiple: Double
+    val volumeMultiple: Double,
+    /** Hours of the day (0-23, Korea time) at which the scan runs. Empty = every hour. */
+    val hours: List<Int> = emptyList()
 ) {
     val label: String get() = ScanOptions.INTERVALS[interval] ?: interval
 
@@ -28,6 +30,11 @@ data class ScanConfig(
     fun scheduleText(): String {
         val sorted = minutes.sorted()
         if (sorted.isEmpty()) return "시간 미설정"
+        if (hours.isNotEmpty()) {
+            val h = hours.sorted().joinToString("·") { "${it}시" }
+            val m = sorted.joinToString("·") { if (it == 0) "정각" else "${it}분" }
+            return "매일 $h $m"
+        }
         if (sorted.size == 1) return if (sorted[0] == 0) "매시 정각" else "매시 ${sorted[0]}분"
         return "매시 " + sorted.joinToString(" · ") { if (it == 0) "정각" else "${it}분" }
     }
@@ -46,8 +53,42 @@ object ScanOptions {
         "15m" to "15분봉",
         "1h" to "1시간봉",
         "4h" to "4시간봉",
+        "6h" to "6시간봉",
+        "8h" to "8시간봉",
+        "12h" to "12시간봉",
         "1d" to "1일봉"
     )
+
+    /** Candles of 4 hours or more are scanned by hour of the day, not only by minute. */
+    val HOURLY: Set<String> = setOf("4h", "6h", "8h", "12h", "1d")
+
+    fun isHourly(interval: String): Boolean = interval in HOURLY
+
+    /**
+     * Hours (Korea time) that are 10 minutes before a candle closes, scanned at minute 50.
+     * Binance candles open at 00:00 UTC (= 09:00 KST) and repeat.
+     */
+    fun closePreset(interval: String): Pair<List<Int>, Int> = when (interval) {
+        "4h" -> listOf(0, 4, 8, 12, 16, 20) to 50
+        "6h" -> listOf(2, 8, 14, 20) to 50
+        "8h" -> listOf(0, 8, 16) to 50
+        "12h" -> listOf(8, 20) to 50
+        "1d" -> listOf(8) to 50
+        else -> emptyList<Int>() to 50
+    }
+
+    /** "4, 8 12" -> [4, 8, 12]. Blank -> empty list (every hour). Null if invalid (not 0-23). */
+    fun parseHours(text: String?): List<Int>? {
+        if (text.isNullOrBlank()) return emptyList()
+        val parts = text.split(',', ' ', ';', '，', '·').filter { it.isNotBlank() }
+        val result = ArrayList<Int>()
+        for (part in parts) {
+            val hour = part.trim().removeSuffix("시").toIntOrNull() ?: return null
+            if (hour !in 0..23) return null
+            result.add(hour)
+        }
+        return result.distinct().sorted()
+    }
 
     /**
      * "0, 15 30;45" -> [0, 15, 30, 45]. Returns null if the text is empty or has anything that

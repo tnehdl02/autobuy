@@ -133,6 +133,7 @@ object WatchStore {
                 put("high", e.config.highPct)
                 put("live", e.config.livePct)
                 put("volume", e.config.volumeMultiple)
+                put("hours", e.config.hours.joinToString(","))
             })
         }
         prefsOf(context).edit().putString(KEY_WATCHES, array.toString()).apply()
@@ -154,7 +155,8 @@ object WatchStore {
                         minutes = ScanOptions.parseMinutes(o.optString("minutes")) ?: FALLBACK.minutes,
                         highPct = o.optDouble("high", FALLBACK.highPct),
                         livePct = o.optDouble("live", FALLBACK.livePct),
-                        volumeMultiple = o.optDouble("volume", FALLBACK.volumeMultiple)
+                        volumeMultiple = o.optDouble("volume", FALLBACK.volumeMultiple),
+                        hours = ScanOptions.parseHours(o.optString("hours", "")) ?: emptyList()
                     )
                 )
             )

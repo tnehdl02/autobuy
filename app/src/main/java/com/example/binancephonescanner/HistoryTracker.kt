@@ -13,8 +13,8 @@ import java.util.concurrent.TimeUnit
  *
  *  - Stop-loss: the low of the detected candle. It counts as hit when any later 1-minute candle
  *    trades below that low. The time of the first such candle is saved.
- *  - Peak: the highest price within 5 days after the detection, as if the stop-loss had not
- *    existed. The highest price reached before the stop-loss was hit is saved separately.
+ *  - Peak: the highest price within 5 days after the detection (from the next minute on; the
+ *    detected candle does not need to be closed), as if the stop-loss had not existed. The highest price reached before the stop-loss was hit is saved separately.
  *
  * Only the new minutes since the last update are downloaded, so each update is small. Limits:
  * within a single 1-minute candle it is unknown whether the low or the high came first, so a
@@ -59,11 +59,15 @@ object HistoryTracker {
         val windowEnd = m.observedAt + WINDOW_MS
         val fetchEnd = minOf(now, windowEnd)
 
-        var start = if (m.trackedUntil > 0L) m.trackedUntil else m.observedAt - (m.observedAt % MINUTE_MS)
-        var stopTime = m.stopTime
-        var peak = if (m.peakPrice > 0.0) m.peakPrice else m.price
-        var peakTime = if (m.peakTime > 0L) m.peakTime else m.observedAt
-        var peakBeforeStop = if (m.peakBeforeStop > 0.0) m.peakBeforeStop else m.price
+        // The peak counts from the minute after the detection.
+        val peakFrom = (m.observedAt / MINUTE_MS + 1L) * MINUTE_MS
+        // Records of older versions waited for the detected candle to close: recount them once.
+        val recount = m.peakStart > peakFrom
+        var start = if (m.trackedUntil > 0L && !recount) m.trackedUntil else m.observedAt - (m.observedAt % MINUTE_MS)
+        var stopTime = if (recount) 0L else m.stopTime
+        var peak = if (recount || m.peakPrice <= 0.0) m.price else m.peakPrice
+        var peakTime = if (recount || m.peakTime <= 0L) m.observedAt else m.peakTime
+        var peakBeforeStop = if (recount || m.peakBeforeStop <= 0.0) m.price else m.peakBeforeStop
         var lastOpen = start
         var lastClose = if (m.lastPrice > 0.0) m.lastPrice else m.price
         var lastCloseTime = m.lastPriceTime
@@ -81,13 +85,7 @@ object HistoryTracker {
                 val high = row.getString(2).toDouble()
                 val low = row.getString(3).toDouble()
 
-                // The peak is counted from the candle AFTER the detected candle (peakStart), so
-                // the rest of the candle that met the conditions is excluded. Records saved by
-                // older versions have no peakStart: in the detection minute a new high only
-                // counts if it beats the high known at detection.
-                val detectionMinute = m.observedAt >= openTime && m.observedAt < openTime + MINUTE_MS
-                val highCounts = if (m.peakStart > 0L) openTime >= m.peakStart
-                else (!detectionMinute || high > m.highAtDetection)
+                val highCounts = openTime >= peakFrom
                 // A low below the stop level can only have happened after the detection.
                 val breaksStop = low < m.lowPrice
 
@@ -109,6 +107,7 @@ object HistoryTracker {
 
         return m.copy(
             trackedUntil = lastOpen,
+            peakStart = peakFrom,
             stopTime = stopTime,
             peakPrice = peak,
             peakTime = peakTime,

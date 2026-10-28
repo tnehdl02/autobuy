@@ -203,10 +203,7 @@ class HistoryActivity : ComponentActivity() {
 
             // 4. Peak within 5 days, excluding the detected candle
             lines.append("\n④ 5일 고점 ")
-            val now = System.currentTimeMillis()
-            if (m.peakStart > 0L && now < m.peakStart) {
-                lines.append("감지된 봉이 마감된 뒤부터 집계 (${timeFormat.format(Date(m.peakStart))}~)")
-            } else if (m.peakPrice > m.price) {
+            if (m.peakPrice > m.price) {
                 lines.append("${formatPrice(m.peakPrice)} (진입가 대비 ${pct(m.peakPct)}, ${timeFormat.format(Date(m.peakTime))})")
             } else {
                 lines.append("진입가 위로 오르지 않음")

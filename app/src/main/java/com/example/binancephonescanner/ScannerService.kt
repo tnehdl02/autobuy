@@ -272,14 +272,19 @@ class ScannerService : Service() {
     // ---- Schedule -------------------------------------------------------------------------
 
     private fun nextTarget(watch: Watch, now: ZonedDateTime = ZonedDateTime.now(KST)): ZonedDateTime {
+        val cfg = watch.config
+        val minutes = cfg.minutes.sorted().ifEmpty { listOf(0) }
         val hourStart = now.truncatedTo(ChronoUnit.HOURS)
-        for (hourOffset in 0L..1L) {
-            for (minute in watch.scanMinutes) {
-                val target = hourStart.plusHours(hourOffset).withMinute(minute).withSecond(5).withNano(0)
+        // Empty hours = every hour. Otherwise only the chosen hours of the day (Korea time).
+        for (offset in 0L..(24L * 8)) {
+            val hour = hourStart.plusHours(offset)
+            if (cfg.hours.isNotEmpty() && hour.hour !in cfg.hours) continue
+            for (minute in minutes) {
+                val target = hour.withMinute(minute).withSecond(5).withNano(0)
                 if (now.isBefore(target)) return target
             }
         }
-        return hourStart.plusHours(2).withMinute(watch.scanMinutes.first()).withSecond(5).withNano(0)
+        return hourStart.plusDays(1).withMinute(minutes.first()).withSecond(5).withNano(0)
     }
 
     /** Among the timeframes that are switched on: which scan comes first, and when. Null if none. */
@@ -624,9 +629,12 @@ class ScannerService : Service() {
             if (highPct >= cfg.highPct &&
                 changePct >= cfg.livePct &&
                 volumeMultiple >= cfg.volumeMultiple) {
+                // The peak is counted from the minute after the detection (no need to wait
+                // for the detected candle to close).
+                val detectedAt = System.currentTimeMillis()
                 Match(
                     symbol, livePrice, highPct, changePct, volumeMultiple, lowPrice, highPrice,
-                    System.currentTimeMillis(), openPrice, candleCloseTime + 1L, cfg.label
+                    detectedAt, openPrice, (detectedAt / 60_000L + 1L) * 60_000L, cfg.label
                 )
             } else null
         } catch (_: Exception) {

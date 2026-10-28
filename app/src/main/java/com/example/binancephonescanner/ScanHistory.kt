@@ -165,7 +165,7 @@ object ScanHistory {
             peakTime = if (newerPeak) new.peakTime else old.peakTime,
             peakBeforeStop = maxOf(old.peakBeforeStop, new.peakBeforeStop),
             done = old.done || new.done,
-            peakStart = if (old.peakStart > 0L) old.peakStart else new.peakStart,
+            peakStart = listOf(old.peakStart, new.peakStart).filter { it > 0L }.minOrNull() ?: 0L,
             lastPrice = if (new.lastPriceTime >= old.lastPriceTime) new.lastPrice else old.lastPrice,
             lastPriceTime = maxOf(old.lastPriceTime, new.lastPriceTime)
         )
