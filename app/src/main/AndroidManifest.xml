@@ -12,8 +12,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="Auto Coin"
-        android:icon="@drawable/ic_launcher2"
+        android:label="Binance Auto Buy"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
         <activity
