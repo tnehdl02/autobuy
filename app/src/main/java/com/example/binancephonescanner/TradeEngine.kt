@@ -159,6 +159,13 @@ object TradeEngine {
         synchronized(lock) { logOnce(context, key, text, 120_000L) }
     }
 
+    /** Deletes the whole auto-buy log (the list at the bottom of the main screen). */
+    fun clearLog(context: Context) {
+        synchronized(lock) {
+            TradeSettings.prefs(context).edit().remove(KEY_LOG).apply()
+        }
+    }
+
     fun logLines(context: Context): List<String> {
         val raw = TradeSettings.prefs(context).getString(KEY_LOG, "") ?: ""
         return raw.lines().filter { it.isNotBlank() }

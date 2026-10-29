@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -100,12 +101,17 @@ class HistoryActivity : ComponentActivity() {
                 if (updatedAt > 0L) "마지막 갱신: ${timeFormat.format(Date(updatedAt))}" else "아직 현재가를 갱신하지 않았습니다.",
                 12f, Color.rgb(174, 194, 211), false
             ),
-            margin(0, 0, 0, 12)
+            margin(0, 0, 0, 10)
         )
 
         val matches = ScanHistory.load(this, watch)
             .flatMap { it.matches }
             .sortedByDescending { it.observedAt }
+
+        // Delete everything shown on this screen (detected symbols and the scan log).
+        val deleteAll = button("기록 전체 삭제", Color.rgb(150, 60, 70))
+        deleteAll.setOnClickListener { confirmDeleteAll(watch, matches.size) }
+        root.addView(deleteAll, LinearLayout.LayoutParams(-1, dp(44)).apply { bottomMargin = dp(12) })
 
         // ---- Short summary ----
         val trackable = matches.filter { it.isTrackable }
@@ -224,6 +230,38 @@ class HistoryActivity : ComponentActivity() {
         buttons.addView(delete, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(8) })
         card.addView(buttons)
         return card
+    }
+
+    private fun confirmDeleteAll(watch: Watch, count: Int) {
+        val tradeLogBox = CheckBox(this).apply {
+            text = "자동매수 거래 기록(메인 화면 아래)도 함께 삭제"
+            isChecked = false
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(4), dp(22), 0)
+            addView(tradeLogBox)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("기록 전체 삭제")
+            .setMessage("감지된 종목 기록 ${count}건과 최근 검사 로그를 모두 삭제합니다.\n삭제하면 되돌릴 수 없습니다.")
+            .setView(container)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("전체 삭제") { _, _ ->
+                if (tradeLogBox.isChecked) TradeEngine.clearLog(this)
+                deleteAllHistory(watch)
+            }
+            .show()
+    }
+
+    private fun deleteAllHistory(watch: Watch) {
+        ScanHistory.deleteAll(this, watch.id)
+        getSharedPreferences(ScannerService.PREFS, MODE_PRIVATE).edit()
+            .remove(watch.key("scan_logs"))
+            .remove(watch.key("track_updated"))
+            .apply()
+        Toast.makeText(this, "기록을 모두 삭제했습니다.", Toast.LENGTH_SHORT).show()
+        buildScreen(watch)
     }
 
     private fun confirmDelete(watch: Watch, m: ScanHistory.MatchRecord) {
