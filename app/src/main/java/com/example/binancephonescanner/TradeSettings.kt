@@ -32,7 +32,11 @@ data class TradeConfig(
     val trailStartPct: Double,
     val trailDropPct: Double,
     /** Each symbol is sold alone when its price is this % above its entry (0 = not used). */
-    val symbolTargetPct: Double = 0.0
+    val symbolTargetPct: Double = 0.0,
+    /** False = the sell line follows the peak (peak - drop). True = it stays at start - drop. */
+    val trailFixed: Boolean = false,
+    /** True = the total return is written down every 10 minutes (the "기록" button). */
+    val recordPct: Boolean = false
 ) {
     fun windowText(): String = minText(startMin) + " ~ " + minText(endMin)
 }
@@ -113,7 +117,9 @@ object TradeSettings {
             targetPct = p.getString("target_pct", null)?.toDoubleOrNull() ?: DEFAULT_TARGET_PCT,
             trailStartPct = p.getString("trail_start_pct", null)?.toDoubleOrNull() ?: DEFAULT_TRAIL_START_PCT,
             trailDropPct = p.getString("trail_drop_pct", null)?.toDoubleOrNull() ?: DEFAULT_TRAIL_DROP_PCT,
-            symbolTargetPct = p.getString("symbol_target_pct", null)?.toDoubleOrNull() ?: 0.0
+            symbolTargetPct = p.getString("symbol_target_pct", null)?.toDoubleOrNull() ?: 0.0,
+            trailFixed = p.getBoolean("trail_fixed", false),
+            recordPct = p.getBoolean("record_pct", false)
         )
     }
 
@@ -131,7 +137,12 @@ object TradeSettings {
             .putString("trail_start_pct", config.trailStartPct.toString())
             .putString("trail_drop_pct", config.trailDropPct.toString())
             .putString("symbol_target_pct", config.symbolTargetPct.toString())
+            .putBoolean("trail_fixed", config.trailFixed)
             .apply()
+    }
+
+    fun setRecordPct(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("record_pct", enabled).apply()
     }
 
     fun setAutoBuy(context: Context, enabled: Boolean) {

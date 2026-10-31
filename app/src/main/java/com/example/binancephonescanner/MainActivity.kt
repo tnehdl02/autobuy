@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var progressPanel: LinearLayout
     private lateinit var pctText: TextView
     private lateinit var peakText: TextView
+    private lateinit var recordButton: Button
     private lateinit var targetBar: ProgressBar
     private lateinit var targetText: TextView
     private lateinit var trailText: TextView
@@ -331,8 +332,22 @@ class MainActivity : ComponentActivity() {
         pctText = mono("+0.00%", 30f, green, true, singleLine = true)
         pctColumn.addView(pctText)
         pctRow.addView(pctColumn, LinearLayout.LayoutParams(0, -2, 1f))
+        val peakColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+        }
+        recordButton = Button(this).apply {
+            textSize = 11.5f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            stateListAnimator = null
+            setPadding(dp(10), 0, dp(10), 0)
+            setOnClickListener { toggleRecord() }
+        }
+        peakColumn.addView(recordButton, LinearLayout.LayoutParams(-2, dp(30)).apply { bottomMargin = dp(6) })
         peakText = mono("", 13f, muted, false, singleLine = true)
-        pctRow.addView(peakText)
+        peakColumn.addView(peakText)
+        pctRow.addView(peakColumn)
         progressPanel.addView(pctRow)
         targetBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -569,6 +584,18 @@ class MainActivity : ComponentActivity() {
         refreshLog()
     }
 
+    /** The "기록" button: starts or stops writing the total return down every 10 minutes. */
+    private fun toggleRecord() {
+        val now = !TradeSettings.load(this).recordPct
+        TradeSettings.setRecordPct(this, now)
+        Toast.makeText(
+            this,
+            if (now) "10분마다 수익률을 기록합니다. 일자별 매매 기록에서 볼 수 있습니다." else "수익률 기록을 멈췄습니다.",
+            Toast.LENGTH_SHORT
+        ).show()
+        safeRefreshData()
+    }
+
     private fun pctLabel(value: Double): String =
         (if (value >= 0) "+" else "") + String.format(Locale.US, "%.2f", value) + "%"
 
@@ -585,6 +612,13 @@ class MainActivity : ComponentActivity() {
         pctText.text = pctLabel(p.pct)
         pctText.setTextColor(if (p.pct >= 0) green else Color.rgb(255, 99, 99))
         peakText.text = "최고 ${pctLabel(p.peakPct)}"
+        val recording = TradeSettings.load(this).recordPct
+        recordButton.text = if (recording) "● 기록 중 (10분마다)" else "○ 기록"
+        recordButton.background = if (recording) {
+            rounded(Color.argb(190, 30, 130, 100), dp(10), Color.argb(150, 120, 230, 190))
+        } else {
+            rounded(Color.argb(130, 60, 80, 100), dp(10), Color.argb(120, 150, 180, 200))
+        }
 
         // Target
         val target = p.targetPct
@@ -610,7 +644,7 @@ class MainActivity : ComponentActivity() {
             else -> {
                 val room = p.pct - p.trailLine
                 trailText.text = "보호선  ● 작동 중 · 청산선 ${pctLabel(p.trailLine)}\n" +
-                    "       현재 여유 ${String.format(Locale.US, "%.2f", room)}%p (하락 폭 ${String.format(Locale.US, "%.2f", p.trailDropPct)}%p)"
+                    "       현재 여유 ${String.format(Locale.US, "%.2f", room)}%p (하락 폭 ${String.format(Locale.US, "%.2f", p.trailDropPct)}%p, ${if (p.trailFixed) "고정" else "최고점 추종"})"
                 trailText.setTextColor(if (room <= p.trailDropPct * 0.3) Color.rgb(255, 99, 99) else green)
             }
         }
@@ -631,7 +665,7 @@ class MainActivity : ComponentActivity() {
         }
         for (e in p.entries) entryRows[e.symbol]?.let { updateEntryRow(it, e, p) }
         updatedText.text = if (p.updatedAt > 0L) {
-            "수익률 갱신 ${logTimeFormat.format(java.util.Date(p.updatedAt)).substring(6)} · 약 10초마다 확인"
+            "수익률 갱신 ${logTimeFormat.format(java.util.Date(p.updatedAt)).substring(6)} · 약 5초마다 확인"
         } else {
             "수익률 확인 대기 중"
         }
@@ -867,7 +901,7 @@ class MainActivity : ComponentActivity() {
             "• 운용 시간: ${config.windowText()} (한국 시간)\n" +
             "• 종목당: 원금의 ${formatNumber(config.slotPct)}% · 레버리지 ${config.leverage}배 · 최대 ${config.maxSlots}종목\n" +
             "• 목표 수익률: +${formatNumber(config.targetPct)}%\n" +
-            "• 보호선: " + (if (config.trailStartPct > 0.0) "+${formatNumber(config.trailStartPct)}% 넘은 뒤 최고점에서 ${formatNumber(config.trailDropPct)}%p 하락 시 청산" else "사용 안 함") + "\n" +
+            "• 보호선: " + (if (config.trailStartPct > 0.0) (if (config.trailFixed) "+${formatNumber(config.trailStartPct)}% 넘은 뒤 +${formatNumber(config.trailStartPct - config.trailDropPct)}% 이하로 내려오면 청산 (고정)" else "+${formatNumber(config.trailStartPct)}% 넘은 뒤 최고점에서 ${formatNumber(config.trailDropPct)}%p 하락 시 청산") else "사용 안 함") + "\n" +
             "• 개별 종목 매도: " + (if (config.symbolTargetPct > 0.0) "각 종목이 진입가 대비 +${formatNumber(config.symbolTargetPct)}%에 닿으면 그 종목만 매도" else "사용 안 함") + "\n" +
             "• 종료 시각 전량 청산: ${if (config.endLiquidate) "예" else "아니오"}\n" +
             "• API 주소: ${config.baseUrl}" + (if (testNet) "  (기본 주소가 아님)" else "") + "\n\n" +
@@ -1064,8 +1098,14 @@ class MainActivity : ComponentActivity() {
         column.addView(trailStartField)
 
         val trailDropField = numberField(formatNumber(current.trailDropPct), "예: 1")
-        column.addView(caption("보호선 하락 폭 (%p, 최고 수익에서 이만큼 내려오면 전량 청산)"))
+        column.addView(caption("보호선 하락 폭 (%p. 고정이면 시작점에서, 아니면 최고 수익에서 이만큼 내려오면 전량 청산)"))
         column.addView(trailDropField)
+
+        val trailFixedBox = CheckBox(this).apply {
+            text = "청산선을 보호선 시작점에 고정 (예: 시작 5, 폭 4 → 최고점이 올라도 +1%에서 청산). 끄면 최고점을 따라 청산선도 올라감"
+            isChecked = current.trailFixed
+        }
+        column.addView(trailFixedBox)
 
         val symbolTargetField = numberField(formatNumber(current.symbolTargetPct), "예: 3  (0이면 사용 안 함)")
         column.addView(caption("개별 종목 목표 (진입가 대비 가격 상승 %. 예: 3 → 각 종목이 +3%에 닿으면 그 종목만 매도, 0이면 사용 안 함)"))
@@ -1138,7 +1178,8 @@ class MainActivity : ComponentActivity() {
                     targetPct = target,
                     trailStartPct = trailStart,
                     trailDropPct = trailDrop,
-                    symbolTargetPct = symbolTarget
+                    symbolTargetPct = symbolTarget,
+                    trailFixed = trailFixedBox.isChecked
                 )
             )
             Toast.makeText(this, "저장했습니다.", Toast.LENGTH_SHORT).show()

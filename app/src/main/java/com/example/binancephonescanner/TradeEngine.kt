@@ -49,6 +49,12 @@ object TradeEngine {
         var startEquity = 0.0
         var slotUsdt = 0.0
         var peakPct = 0.0
+        /** True once the "protection line started" notice has been sent this session. */
+        var trailAlerted = false
+        /** Total return written down every 10 minutes while the record button is on. */
+        val samples = ArrayList<DailyTrades.Sample>()
+        /** The 10-minute slot (epoch ms / 600000) of the last sample, so each slot is written once. */
+        var sampleBucket = 0L
         var lastPct = 0.0
         var updatedAt = 0L
         var hedge = false
@@ -86,6 +92,13 @@ object TradeEngine {
             s.startEquity = o.optDouble("startEquity", 0.0)
             s.slotUsdt = o.optDouble("slotUsdt", 0.0)
             s.peakPct = o.optDouble("peakPct", 0.0)
+            s.trailAlerted = o.optBoolean("trailAlerted", false)
+            s.sampleBucket = o.optLong("sampleBucket", 0L)
+            val sampleArray = o.optJSONArray("samples") ?: JSONArray()
+            for (i in 0 until sampleArray.length()) {
+                val m = sampleArray.optJSONObject(i) ?: continue
+                s.samples.add(DailyTrades.Sample(m.optLong("t", 0L), m.optDouble("p", 0.0)))
+            }
             s.lastPct = o.optDouble("lastPct", 0.0)
             s.updatedAt = o.optLong("updatedAt", 0L)
             s.hedge = o.optBoolean("hedge", false)
@@ -121,6 +134,14 @@ object TradeEngine {
         o.put("startEquity", s.startEquity)
         o.put("slotUsdt", s.slotUsdt)
         o.put("peakPct", s.peakPct)
+        o.put("trailAlerted", s.trailAlerted)
+        o.put("sampleBucket", s.sampleBucket)
+        val sampleArray = JSONArray()
+        for (m in s.samples) sampleArray.put(JSONObject().apply {
+            put("t", m.time)
+            put("p", m.pct)
+        })
+        o.put("samples", sampleArray)
         o.put("lastPct", s.lastPct)
         o.put("updatedAt", s.updatedAt)
         o.put("hedge", s.hedge)
@@ -348,17 +369,39 @@ object TradeEngine {
         s.lastPct = pct
         s.updatedAt = System.currentTimeMillis()
         if (pct > s.peakPct) s.peakPct = pct
+        if (config.recordPct) {
+            val now = System.currentTimeMillis()
+            val bucket = now / 600_000L
+            if (bucket != s.sampleBucket) {
+                s.sampleBucket = bucket
+                s.samples.add(DailyTrades.Sample(now, pct))
+            }
+        }
+        if (config.trailStartPct > 0.0 && !s.trailAlerted && s.peakPct >= config.trailStartPct) {
+            s.trailAlerted = true
+            val text = if (config.trailFixed) {
+                "수익률 ${fmtPct(s.peakPct)} 도달 · 고정 청산선 ${fmtPct(config.trailStartPct - config.trailDropPct)} 아래로 내려오면 전량 청산합니다"
+            } else {
+                "수익률 ${fmtPct(s.peakPct)} 도달 · 현재 청산선 ${fmtPct(s.peakPct - config.trailDropPct)} (최고점이 오르면 청산선도 같이 올라갑니다)"
+            }
+            log(context, "보호선 작동 시작: $text")
+            pushNotice("보호선 작동 시작", text)
+        }
         saveState(context, s)
 
         if (pct >= config.targetPct) {
             beginLiquidation(context, config, s, "목표 수익률 도달 (${fmtPct(pct)})")
-        } else if (config.trailStartPct > 0.0 &&
-            s.peakPct >= config.trailStartPct &&
-            pct <= s.peakPct - config.trailDropPct) {
-            beginLiquidation(
-                context, config, s,
-                "보호선: 최고 ${fmtPct(s.peakPct)}에서 ${fmtPct(pct)}로 하락"
-            )
+        } else if (config.trailStartPct > 0.0 && s.peakPct >= config.trailStartPct) {
+            val line = if (config.trailFixed) config.trailStartPct - config.trailDropPct
+            else s.peakPct - config.trailDropPct
+            if (pct <= line) {
+                val why = if (config.trailFixed) {
+                    "보호선(고정): 최고 ${fmtPct(s.peakPct)} 후 청산선 ${fmtPct(line)} 이하로 하락 (${fmtPct(pct)})"
+                } else {
+                    "보호선: 최고 ${fmtPct(s.peakPct)}에서 ${fmtPct(pct)}로 하락"
+                }
+                beginLiquidation(context, config, s, why)
+            }
         }
     }
 
@@ -467,7 +510,7 @@ object TradeEngine {
                 context,
                 DailyTrades.DayRecord(
                     s.sessionKey, s.startedAt, System.currentTimeMillis(), s.startEquity,
-                    endEquity, s.peakPct, s.reason, results
+                    endEquity, s.peakPct, s.reason, results, s.samples.toList()
                 )
             )
             log(context, "오늘 기록을 일자별 매매 기록에 저장했습니다")
@@ -759,6 +802,7 @@ object TradeEngine {
         val trailStartPct: Double,
         val trailDropPct: Double,
         val symbolTargetPct: Double,
+        val trailFixed: Boolean,
         val entries: List<TradeEntry>
     ) {
         /** 0 = not used, 1 = waiting (peak below the start), 2 = armed (working). */
@@ -770,7 +814,7 @@ object TradeEngine {
             }
 
         /** When armed: the total profit at or below which everything is sold. */
-        val trailLine: Double get() = peakPct - trailDropPct
+        val trailLine: Double get() = if (trailFixed) trailStartPct - trailDropPct else peakPct - trailDropPct
     }
 
     fun progress(context: Context): Progress? {
@@ -780,7 +824,7 @@ object TradeEngine {
         return Progress(
             s.phase, s.reason, config.maxSlots, s.startEquity, s.slotUsdt, s.lastPct, s.peakPct,
             s.updatedAt, config.targetPct, config.trailStartPct, config.trailDropPct,
-            config.symbolTargetPct, s.entries.toList()
+            config.symbolTargetPct, config.trailFixed, s.entries.toList()
         )
     }
 

@@ -708,7 +708,7 @@ class ScannerService : Service() {
                         TradeEngine.logThrottled(this, "tick", "자동매수 점검 오류: ${e.message ?: e.javaClass.simpleName}")
                     }
                     try {
-                        Thread.sleep(10_000L)
+                        Thread.sleep(5_000L)
                     } catch (_: InterruptedException) {
                         break
                     }

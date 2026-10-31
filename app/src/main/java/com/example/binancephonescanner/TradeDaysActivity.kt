@@ -28,6 +28,10 @@ class TradeDaysActivity : ComponentActivity() {
     private val red = Color.rgb(255, 99, 99)
     private val muted = Color.rgb(174, 194, 211)
 
+    /** Days the user opened; every day starts closed, and a screen rebuild keeps what was opened. */
+    private val openDays = HashSet<Long>()
+    private val openSamples = HashSet<Long>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildScreen()
@@ -89,8 +93,8 @@ class TradeDaysActivity : ComponentActivity() {
         }
 
         column.addView(statsCard(DailyTrades.stats(records)), margin(0, 0, 0, 12))
-        records.forEachIndexed { index, record ->
-            column.addView(dayCard(record, expanded = index == 0), margin(0, 0, 0, 10))
+        for (record in records) {
+            column.addView(dayCard(record, expanded = openDays.contains(record.sessionKey)), margin(0, 0, 0, 10))
         }
     }
 
@@ -184,13 +188,81 @@ class TradeDaysActivity : ComponentActivity() {
             margin(0, 10, 0, 6)
         )
         for (s in r.symbols.sortedByDescending { it.pnlPct }) detail.addView(symbolRow(s))
+
+        // 10-minute return record: a button that opens the list.
+        val samplePanel = sampleList(r)
+        samplePanel.visibility = if (openSamples.contains(r.sessionKey)) View.VISIBLE else View.GONE
+        val sampleButton = TextView(this).apply {
+            text = sampleButtonText(r, samplePanel.visibility == View.VISIBLE)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            background = rounded(Color.argb(130, 38, 116, 180), dp(12), Color.argb(120, 150, 200, 230))
+            setOnClickListener {
+                val show = samplePanel.visibility != View.VISIBLE
+                samplePanel.visibility = if (show) View.VISIBLE else View.GONE
+                if (show) openSamples.add(r.sessionKey) else openSamples.remove(r.sessionKey)
+                text = sampleButtonText(r, show)
+            }
+        }
+        detail.addView(sampleButton, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(10) })
+        detail.addView(samplePanel, margin(0, 8, 0, 0))
         card.addView(detail)
 
         card.setOnClickListener {
-            detail.visibility = if (detail.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            val show = detail.visibility != View.VISIBLE
+            detail.visibility = if (show) View.VISIBLE else View.GONE
+            if (show) openDays.add(r.sessionKey) else openDays.remove(r.sessionKey)
         }
         return card
     }
+
+    private fun sampleButtonText(r: DailyTrades.DayRecord, open: Boolean): String =
+        "10분 수익률 기록 (${r.samples.size}개) " + if (open) "▲" else "▼"
+
+    /** The 10-minute records of one day: time and total return, two per row. */
+    private fun sampleList(r: DailyTrades.DayRecord): LinearLayout {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (r.samples.isEmpty()) {
+            box.addView(text("이 날은 10분 수익률 기록이 없습니다. (메인 화면의 기록 버튼을 켜 두면 남습니다)", 12f, muted, false))
+            return box
+        }
+        val best = r.samples.maxByOrNull { it.pct }
+        val worst = r.samples.minByOrNull { it.pct }
+        if (best != null && worst != null) {
+            box.addView(
+                text(
+                    "최고 ${pctText(best.pct)} (${clockText(best.time)}) · 최저 ${pctText(worst.pct)} (${clockText(worst.time)})",
+                    12f, muted, false
+                ),
+                margin(0, 0, 0, 6)
+            )
+        }
+        val sorted = r.samples.sortedBy { it.time }
+        var i = 0
+        while (i < sorted.size) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(3), 0, dp(3))
+            }
+            for (k in 0..1) {
+                val m = sorted.getOrNull(i + k)
+                val cell = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                if (m != null) {
+                    cell.addView(mono(clockText(m.time), 12.5f, muted, false), LinearLayout.LayoutParams(dp(64), -2))
+                    cell.addView(mono(pctText(m.pct), 13f, colorOf(m.pct), true))
+                }
+                row.addView(cell, LinearLayout.LayoutParams(0, -2, 1f))
+            }
+            box.addView(row)
+            i += 2
+        }
+        return box
+    }
+
+    private fun clockText(time: Long): String =
+        SimpleDateFormat("HH:mm", Locale.KOREA).apply { timeZone = kst }.format(Date(time))
 
     private fun trim(value: Double): String =
         java.math.BigDecimal(value.toString()).stripTrailingZeros().toPlainString()

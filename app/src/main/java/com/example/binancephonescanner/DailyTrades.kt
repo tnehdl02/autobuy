@@ -31,6 +31,9 @@ object DailyTrades {
         val win: Boolean get() = if (exact) pnlUsdt > 0.0 else pnlPct > 0.0
     }
 
+    /** Total return (% of the starting equity) at one moment; recorded every 10 minutes. */
+    class Sample(val time: Long, val pct: Double)
+
     class DayRecord(
         /** Start of the window (epoch ms, Korea time): its date is the date of the record. */
         val sessionKey: Long,
@@ -40,7 +43,8 @@ object DailyTrades {
         val endEquity: Double,
         val peakPct: Double,
         val reason: String,
-        val symbols: List<SymbolResult>
+        val symbols: List<SymbolResult>,
+        val samples: List<Sample> = emptyList()
     ) {
         val pnlUsdt: Double get() = endEquity - startEquity
         val pnlPct: Double get() = if (startEquity > 0.0) pnlUsdt / startEquity * 100.0 else 0.0
@@ -142,6 +146,12 @@ object DailyTrades {
             })
         }
         put("symbols", array)
+        val samples = JSONArray()
+        for (m in r.samples) samples.put(JSONObject().apply {
+            put("t", m.time)
+            put("p", m.pct)
+        })
+        put("samples", samples)
     }
 
     private fun fromJson(o: JSONObject): DayRecord {
@@ -157,10 +167,16 @@ object DailyTrades {
                 )
             )
         }
+        val sampleArray = o.optJSONArray("samples") ?: JSONArray()
+        val samples = ArrayList<Sample>()
+        for (i in 0 until sampleArray.length()) {
+            val m = sampleArray.optJSONObject(i) ?: continue
+            samples.add(Sample(m.optLong("t", 0L), m.optDouble("p", 0.0)))
+        }
         return DayRecord(
             o.optLong("sessionKey", 0L), o.optLong("startedAt", 0L), o.optLong("endedAt", 0L),
             o.optDouble("startEquity", 0.0), o.optDouble("endEquity", 0.0), o.optDouble("peakPct", 0.0),
-            o.optString("reason"), symbols
+            o.optString("reason"), symbols, samples
         )
     }
 }
