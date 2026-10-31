@@ -28,6 +28,10 @@
             android:name=".HistoryActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".TradeDaysActivity"
+            android:exported="false" />
+
         <receiver
             android:name=".RestartReceiver"
             android:enabled="true"

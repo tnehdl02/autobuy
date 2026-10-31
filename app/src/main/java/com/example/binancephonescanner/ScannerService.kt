@@ -34,6 +34,8 @@ class ScannerService : Service() {
         const val ACTION_STOP = "com.example.binancephonescanner.STOP"
         const val ACTION_SCAN = "com.example.binancephonescanner.SCAN"
         const val ACTION_LIQUIDATE = "com.example.binancephonescanner.LIQUIDATE"
+        const val ACTION_SELL_ONE = "com.example.binancephonescanner.SELL_ONE"
+        const val EXTRA_SYMBOL = "symbol"
         const val ACTION_WATCHDOG = "com.example.binancephonescanner.WATCHDOG"
         const val WATCHDOG_REQUEST = 3001
         const val EXTRA_WATCH_ID = "watch_id"
@@ -93,6 +95,7 @@ class ScannerService : Service() {
             }
             ACTION_SCAN -> if (requested != null) handleScanAlarm(requested)
             ACTION_LIQUIDATE -> runManualLiquidation()
+            ACTION_SELL_ONE -> runManualSell(intent?.getStringExtra(EXTRA_SYMBOL))
             ACTION_WATCHDOG -> resumeMonitoring()
             ACTION_START -> {
                 if (requested != null) enableWatch(requested)
@@ -767,6 +770,23 @@ class ScannerService : Service() {
                 releaseWakeLock(wakeLock)
             }
         }, "manual-liquidate")
+        thread.isDaemon = true
+        thread.start()
+    }
+
+    /** The "매도" button of one symbol. Runs on its own thread. */
+    private fun runManualSell(symbol: String?) {
+        if (symbol.isNullOrBlank()) return
+        val wakeLock = acquireWakeLock()
+        val thread = Thread({
+            try {
+                TradeEngine.manualSell(this, symbol)
+            } catch (e: Exception) {
+                TradeEngine.log(this, "$symbol 수동 매도 오류: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                releaseWakeLock(wakeLock)
+            }
+        }, "manual-sell")
         thread.isDaemon = true
         thread.start()
     }

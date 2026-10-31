@@ -85,7 +85,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var targetBar: ProgressBar
     private lateinit var targetText: TextView
     private lateinit var trailText: TextView
-    private lateinit var entriesText: TextView
+    private lateinit var symbolTargetText: TextView
+    private lateinit var entriesBox: LinearLayout
+
+    private class EntryRow(val pnl: TextView, val sub: TextView, val symbol: String)
+
+    private val entryRows = HashMap<String, EntryRow>()
+    private var entriesStructure = ""
     private lateinit var updatedText: TextView
     private lateinit var autoToggle: Button
     private lateinit var liquidateButton: Button
@@ -338,8 +344,10 @@ class MainActivity : ComponentActivity() {
         progressPanel.addView(targetText, margin(0, 6, 0, 0))
         trailText = text("", 13f, Color.WHITE, true)
         progressPanel.addView(trailText, margin(0, 8, 0, 0))
-        entriesText = mono("", 12f, Color.rgb(197, 214, 229), false, singleLine = false)
-        progressPanel.addView(entriesText, margin(0, 10, 0, 0))
+        symbolTargetText = text("", 12.5f, muted, false)
+        progressPanel.addView(symbolTargetText, margin(0, 6, 0, 0))
+        entriesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        progressPanel.addView(entriesBox, margin(0, 10, 0, 0))
         updatedText = text("", 11f, muted, false)
         progressPanel.addView(updatedText, margin(0, 8, 0, 0))
         autoCard.addView(progressPanel, margin(0, 0, 0, 12))
@@ -566,7 +574,7 @@ class MainActivity : ComponentActivity() {
 
     private fun progressHeadline(p: TradeEngine.Progress, config: TradeConfig): String {
         val head = when (p.phase) {
-            TradeEngine.Phase.ACTIVE -> "진행 중 · 진입 ${p.entries.size}/${p.maxSlots} · 종목당 ${String.format(Locale.US, "%.2f", p.slotUsdt)} USDT"
+            TradeEngine.Phase.ACTIVE -> "진행 중 · 진입 ${p.entries.size}/${p.maxSlots} (보유 ${p.entries.count { !it.closed }}) · 종목당 ${String.format(Locale.US, "%.2f", p.slotUsdt)} USDT"
             TradeEngine.Phase.LIQUIDATING -> "전량 청산 진행 중 · ${p.reason}"
             TradeEngine.Phase.ENDED -> "오늘 종료 · ${p.reason}"
         }
@@ -607,16 +615,106 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Purchases
-        entriesText.text = p.entries.joinToString("\n") { e ->
-            val name = e.symbol.removeSuffix("USDT") + "/USDT"
-            "• $name  진입 ${trimPrice(e.entryPrice)}  손절 ${trimPrice(e.stopPrice)}"
+        // Per-symbol sell target
+        symbolTargetText.text = if (p.symbolTargetPct > 0.0) {
+            "개별 매도  각 종목이 진입가 대비 ${pctLabel(p.symbolTargetPct)}에 닿으면 그 종목만 매도"
+        } else {
+            "개별 매도  사용 안 함 (⚙ 설정에서 입력)"
         }
+        symbolTargetText.setTextColor(if (p.symbolTargetPct > 0.0) Color.WHITE else muted)
+
+        // Purchases: one row per symbol with its own profit
+        val structure = p.entries.joinToString("|") { "${it.symbol}:${it.closed}" }
+        if (structure != entriesStructure) {
+            entriesStructure = structure
+            rebuildEntryRows(p)
+        }
+        for (e in p.entries) entryRows[e.symbol]?.let { updateEntryRow(it, e, p) }
         updatedText.text = if (p.updatedAt > 0L) {
             "수익률 갱신 ${logTimeFormat.format(java.util.Date(p.updatedAt)).substring(6)} · 약 10초마다 확인"
         } else {
             "수익률 확인 대기 중"
         }
+    }
+
+    /** Price change of one symbol since its entry (after a sale: until the sale). Null if unknown. */
+    private fun entryGain(e: TradeEngine.TradeEntry): Double? {
+        val price = if (e.closed && e.exitPrice > 0.0) e.exitPrice else e.lastPrice
+        if (price <= 0.0 || e.entryPrice <= 0.0) return null
+        return (price - e.entryPrice) / e.entryPrice * 100.0
+    }
+
+    private fun rebuildEntryRows(p: TradeEngine.Progress) {
+        entriesBox.removeAllViews()
+        entryRows.clear()
+        for (e in p.entries) {
+            val name = e.symbol.removeSuffix("USDT") + "/USDT"
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+            }
+            val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            left.addView(mono(if (e.closed) "✓ $name" else name, 14f, if (e.closed) muted else Color.WHITE, true, singleLine = true))
+            val sub = mono("", 11.5f, muted, false, singleLine = false)
+            left.addView(sub)
+            row.addView(left, LinearLayout.LayoutParams(0, -2, 1f))
+            val pnl = mono("--", 16f, muted, true, singleLine = true).apply { gravity = Gravity.END }
+            row.addView(pnl, LinearLayout.LayoutParams(dp(84), -2))
+            if (!e.closed) {
+                val sell = Button(this).apply {
+                    text = "매도"
+                    textSize = 12f
+                    isAllCaps = false
+                    setTextColor(Color.WHITE)
+                    background = rounded(Color.argb(190, 150, 60, 70), dp(10))
+                    stateListAnimator = null
+                    setPadding(0, 0, 0, 0)
+                    setOnClickListener { confirmSellOne(e.symbol, name) }
+                }
+                row.addView(sell, LinearLayout.LayoutParams(dp(52), dp(34)).apply { marginStart = dp(6) })
+            }
+            entriesBox.addView(row)
+            entriesBox.addView(View(this).apply { setBackgroundColor(Color.argb(30, 255, 255, 255)) }, LinearLayout.LayoutParams(-1, 1))
+            entryRows[e.symbol] = EntryRow(pnl, sub, e.symbol)
+        }
+    }
+
+    private fun updateEntryRow(row: EntryRow, e: TradeEngine.TradeEntry, p: TradeEngine.Progress) {
+        val gain = entryGain(e)
+        row.pnl.text = if (gain == null) "--" else pctLabel(gain)
+        row.pnl.setTextColor(
+            when {
+                gain == null -> muted
+                e.closed -> Color.rgb(110, 220, 200)
+                gain >= 0 -> green
+                else -> Color.rgb(255, 99, 99)
+            }
+        )
+        row.sub.text = if (e.closed) {
+            "매도 완료 · ${e.exitReason}"
+        } else {
+            var line = "진입 ${trimPrice(e.entryPrice)} · 손절 ${trimPrice(e.stopPrice)}"
+            if (p.symbolTargetPct > 0.0 && gain != null) {
+                val left = p.symbolTargetPct - gain
+                line += "\n개별 목표 ${pctLabel(p.symbolTargetPct)}까지 " +
+                    (if (left > 0.0) "${String.format(Locale.US, "%.2f", left)}%p" else "도달")
+            }
+            line
+        }
+    }
+
+    private fun confirmSellOne(symbol: String, name: String) {
+        AlertDialog.Builder(this)
+            .setTitle("$name 매도")
+            .setMessage("이 종목만 지금 시장가로 매도합니다.\n거래소에 걸린 이 종목의 손절 주문도 함께 취소되고, 오늘 세션에서 다시 매수하지 않습니다.")
+            .setNegativeButton("취소", null)
+            .setPositiveButton("매도") { _, _ ->
+                sendService(ScannerService.ACTION_SELL_ONE, null, symbol)
+                Toast.makeText(this, "$name 매도를 요청했습니다.", Toast.LENGTH_SHORT).show()
+                afterAction()
+            }
+            .show()
     }
 
     private fun trimPrice(value: Double): String =
@@ -686,6 +784,7 @@ class MainActivity : ComponentActivity() {
             shown = message
             color = when {
                 message.contains("긴급") || message.contains("실패") || message.contains("오류") -> Color.rgb(255, 99, 99)
+                message.contains("매도 완료") -> Color.rgb(110, 220, 200)
                 message.contains("청산") || message.contains("종료") -> Color.rgb(255, 190, 110)
                 message.contains("건너뜀") -> Color.rgb(150, 168, 184)
                 else -> Color.WHITE
@@ -707,11 +806,12 @@ class MainActivity : ComponentActivity() {
 
     // ---- Actions --------------------------------------------------------------------------
 
-    private fun sendService(action: String, watchId: String?) {
+    private fun sendService(action: String, watchId: String?, symbol: String? = null) {
         try {
             val intent = Intent(this, ScannerService::class.java).apply {
                 this.action = action
                 if (watchId != null) putExtra(ScannerService.EXTRA_WATCH_ID, watchId)
+                if (symbol != null) putExtra(ScannerService.EXTRA_SYMBOL, symbol)
             }
             ContextCompat.startForegroundService(this, intent)
         } catch (e: Exception) {
@@ -724,16 +824,17 @@ class MainActivity : ComponentActivity() {
         handler.postDelayed({ safeRefreshData() }, 4000)
     }
 
-    /** The gear button: auto-buy settings, API test, background setting. */
+    /** The gear button: auto-buy settings, daily trade records, API test, background setting. */
     private fun showSettingsMenu() {
-        val items = arrayOf("자동매수 설정 (API 키 · 시간 · 금액)", "API 연결 테스트", "백그라운드 유지 설정")
+        val items = arrayOf("자동매수 설정 (API 키 · 시간 · 금액)", "일자별 매매 기록", "API 연결 테스트", "백그라운드 유지 설정")
         AlertDialog.Builder(this)
             .setTitle("설정")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> showTradeSettingsDialog()
-                    1 -> testConnection()
-                    2 -> openBatterySettings()
+                    1 -> startActivity(Intent(this, TradeDaysActivity::class.java))
+                    2 -> testConnection()
+                    3 -> openBatterySettings()
                 }
             }
             .setNegativeButton("닫기", null)
@@ -767,6 +868,7 @@ class MainActivity : ComponentActivity() {
             "• 종목당: 원금의 ${formatNumber(config.slotPct)}% · 레버리지 ${config.leverage}배 · 최대 ${config.maxSlots}종목\n" +
             "• 목표 수익률: +${formatNumber(config.targetPct)}%\n" +
             "• 보호선: " + (if (config.trailStartPct > 0.0) "+${formatNumber(config.trailStartPct)}% 넘은 뒤 최고점에서 ${formatNumber(config.trailDropPct)}%p 하락 시 청산" else "사용 안 함") + "\n" +
+            "• 개별 종목 매도: " + (if (config.symbolTargetPct > 0.0) "각 종목이 진입가 대비 +${formatNumber(config.symbolTargetPct)}%에 닿으면 그 종목만 매도" else "사용 안 함") + "\n" +
             "• 종료 시각 전량 청산: ${if (config.endLiquidate) "예" else "아니오"}\n" +
             "• API 주소: ${config.baseUrl}" + (if (testNet) "  (기본 주소가 아님)" else "") + "\n\n" +
             "운용 시간 안에 켜면 지금의 USDT 잔고를 원금으로 잡고 바로 시작합니다. 켜 두면 매일 정해진 시각에 자동으로 시작합니다."
@@ -965,6 +1067,10 @@ class MainActivity : ComponentActivity() {
         column.addView(caption("보호선 하락 폭 (%p, 최고 수익에서 이만큼 내려오면 전량 청산)"))
         column.addView(trailDropField)
 
+        val symbolTargetField = numberField(formatNumber(current.symbolTargetPct), "예: 3  (0이면 사용 안 함)")
+        column.addView(caption("개별 종목 목표 (진입가 대비 가격 상승 %. 예: 3 → 각 종목이 +3%에 닿으면 그 종목만 매도, 0이면 사용 안 함)"))
+        column.addView(symbolTargetField)
+
         column.addView(TextView(this).apply {
             text = "API 키는 이 폰의 보안 저장소(Keystore)로 암호화해서 저장합니다. 변경한 값은 이미 시작한 세션에는 적용되지 않고, 다음 세션부터 적용됩니다(종목당 금액은 세션 시작 때 정해집니다)."
             textSize = 12f
@@ -996,6 +1102,8 @@ class MainActivity : ComponentActivity() {
             if (trailStart == null || trailStart < 0.0) { fail("보호선 시작은 0 이상의 숫자로 입력하세요. (0이면 사용 안 함)"); return@setOnClickListener }
             val trailDrop = trailDropField.text.toString().trim().toDoubleOrNull()
             if (trailDrop == null || trailDrop <= 0.0) { fail("보호선 하락 폭은 0보다 큰 숫자로 입력하세요."); return@setOnClickListener }
+            val symbolTarget = symbolTargetField.text.toString().trim().toDoubleOrNull()
+            if (symbolTarget == null || symbolTarget < 0.0) { fail("개별 종목 목표는 0 이상의 숫자로 입력하세요. (0이면 사용 안 함)"); return@setOnClickListener }
             if (trailStart > 0.0 && trailStart >= target) { fail("보호선 시작은 목표 수익률보다 작아야 합니다."); return@setOnClickListener }
             val startMin = parseTime(startField.text.toString())
             val endMin = parseTime(endField.text.toString())
@@ -1029,7 +1137,8 @@ class MainActivity : ComponentActivity() {
                     maxSlots = maxSlots,
                     targetPct = target,
                     trailStartPct = trailStart,
-                    trailDropPct = trailDrop
+                    trailDropPct = trailDrop,
+                    symbolTargetPct = symbolTarget
                 )
             )
             Toast.makeText(this, "저장했습니다.", Toast.LENGTH_SHORT).show()

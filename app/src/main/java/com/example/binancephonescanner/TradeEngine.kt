@@ -32,7 +32,14 @@ object TradeEngine {
         val stopPrice: Double,
         val algoId: Long,
         val time: Long
-    )
+    ) {
+        /** True once this symbol has been sold on its own (target or manual sell). */
+        var closed = false
+        var exitPrice = 0.0
+        var exitReason = ""
+        /** Last price seen by the monitor (0 = not known yet). */
+        var lastPrice = 0.0
+    }
 
     class TradeState {
         var sessionKey = 0L
@@ -85,16 +92,19 @@ object TradeEngine {
             val array = o.optJSONArray("entries") ?: JSONArray()
             for (i in 0 until array.length()) {
                 val e = array.getJSONObject(i)
-                s.entries.add(
-                    TradeEntry(
-                        e.optString("symbol"),
-                        e.optDouble("qty", 0.0),
-                        e.optDouble("entryPrice", 0.0),
-                        e.optDouble("stopPrice", 0.0),
-                        e.optLong("algoId", 0L),
-                        e.optLong("time", 0L)
-                    )
+                val entry = TradeEntry(
+                    e.optString("symbol"),
+                    e.optDouble("qty", 0.0),
+                    e.optDouble("entryPrice", 0.0),
+                    e.optDouble("stopPrice", 0.0),
+                    e.optLong("algoId", 0L),
+                    e.optLong("time", 0L)
                 )
+                entry.closed = e.optBoolean("closed", false)
+                entry.exitPrice = e.optDouble("exitPrice", 0.0)
+                entry.exitReason = e.optString("exitReason", "")
+                entry.lastPrice = e.optDouble("lastPrice", 0.0)
+                s.entries.add(entry)
             }
             s
         } catch (_: Exception) {
@@ -123,6 +133,10 @@ object TradeEngine {
             item.put("stopPrice", e.stopPrice)
             item.put("algoId", e.algoId)
             item.put("time", e.time)
+            item.put("closed", e.closed)
+            item.put("exitPrice", e.exitPrice)
+            item.put("exitReason", e.exitReason)
+            item.put("lastPrice", e.lastPrice)
             array.put(item)
         }
         o.put("entries", array)
@@ -257,6 +271,10 @@ object TradeEngine {
                     saveState(context, s)
                     log(context, "종료 시각이 되어 전량 청산을 시작합니다")
                 } else {
+                    if (s.entries.isNotEmpty()) {
+                        s.reason = "종료 시각 도달 (청산 안 함)"
+                        recordDay(context, apiClient(context, config), s, null)
+                    }
                     clearState(context)
                     s = null
                 }
@@ -318,6 +336,7 @@ object TradeEngine {
     /** Checks the total profit against the target and the trailing line. */
     private fun monitor(context: Context, config: TradeConfig, s: TradeState) {
         val api = apiClient(context, config) ?: return
+        checkSymbolTargets(context, config, s, api)
         val equity: Double = try {
             api.balanceUsdt().equity
         } catch (e: Exception) {
@@ -343,6 +362,150 @@ object TradeEngine {
         }
     }
 
+    /**
+     * Keeps the last price of every open symbol up to date and sells a symbol on its own when its
+     * price is [TradeConfig.symbolTargetPct] % above its entry price.
+     */
+    private fun checkSymbolTargets(context: Context, config: TradeConfig, s: TradeState, api: BinanceApi) {
+        val open = s.entries.filter { !it.closed }
+        if (open.isEmpty()) return
+        val prices: Map<String, Double> = try {
+            api.lastPrices()
+        } catch (e: Exception) {
+            logOnce(context, "prices", "가격 조회 실패: ${e.message ?: e.javaClass.simpleName}", 120_000L)
+            return
+        }
+        var changed = false
+        for (e in open) {
+            val price = prices[e.symbol] ?: continue
+            if (price > 0.0) {
+                e.lastPrice = price
+                changed = true
+            }
+        }
+        if (changed) saveState(context, s)
+        if (config.symbolTargetPct <= 0.0) return
+        for (e in open) {
+            if (e.closed || e.lastPrice <= 0.0 || e.entryPrice <= 0.0) continue
+            val gain = (e.lastPrice - e.entryPrice) / e.entryPrice * 100.0
+            if (gain >= config.symbolTargetPct) {
+                sellOne(context, config, s, e, "개별 목표 ${fmtPct(config.symbolTargetPct)} 도달", api)
+            }
+        }
+    }
+
+    /** Sells one symbol (reduce-only market order), removes its stop order, and marks it as closed. */
+    private fun sellOne(
+        context: Context,
+        config: TradeConfig,
+        s: TradeState,
+        e: TradeEntry,
+        reason: String,
+        apiIn: BinanceApi? = null
+    ): Boolean {
+        val api = apiIn ?: apiClient(context, config)
+        if (api == null) {
+            log(context, "${e.symbol} 매도하려 했지만 API 키가 없습니다")
+            return false
+        }
+        try {
+            var amount = api.positionAmt(e.symbol)
+            if (amount.signum() > 0) {
+                api.marketOrder(e.symbol, "SELL", plain(amount), s.hedge, true)
+                amount = api.positionAmt(e.symbol)
+            }
+            if (amount.signum() > 0) {
+                logOnce(context, "sell_${e.symbol}", "${e.symbol} 매도 실패: 포지션이 남아 있습니다", 60_000L)
+                return false
+            }
+            try {
+                api.cancelAllStops(e.symbol)
+            } catch (_: Exception) {
+            }
+            e.closed = true
+            e.exitPrice = e.lastPrice
+            e.exitReason = reason
+            saveState(context, s)
+            val gain = if (e.entryPrice > 0.0 && e.lastPrice > 0.0) (e.lastPrice - e.entryPrice) / e.entryPrice * 100.0 else 0.0
+            val text = "${e.symbol} 매도 완료 · $reason · 진입 ${plain(BigDecimal(e.entryPrice.toString()))} → ${plain(BigDecimal(e.lastPrice.toString()))} (${fmtPct(gain)})"
+            log(context, text)
+            pushNotice("종목 매도 완료", text)
+            return true
+        } catch (ex: Exception) {
+            logOnce(context, "sell_${e.symbol}", "${e.symbol} 매도 실패: ${ex.message ?: ex.javaClass.simpleName}", 60_000L)
+            return false
+        }
+    }
+
+    /** The "매도" button next to one symbol. */
+    fun manualSell(context: Context, symbol: String) {
+        synchronized(lock) {
+            val config = TradeSettings.load(context)
+            val s = loadState(context)
+            val entry = s?.entries?.firstOrNull { it.symbol == symbol && !it.closed }
+            if (s == null || entry == null || s.phase != Phase.ACTIVE) {
+                log(context, "$symbol 수동 매도: 매도할 수 있는 상태가 아닙니다")
+                return
+            }
+            sellOne(context, config, s, entry, "수동 매도")
+        }
+    }
+
+    /** Saves the finished cycle as one daily record (summary + one result per symbol). */
+    private fun recordDay(context: Context, api: BinanceApi?, s: TradeState, endEquityIn: Double?) {
+        if (s.entries.isEmpty()) return
+        try {
+            var endEquity = endEquityIn ?: s.startEquity * (1.0 + s.lastPct / 100.0)
+            if (endEquityIn == null && api != null) {
+                try {
+                    endEquity = api.balanceUsdt().equity
+                } catch (_: Exception) {
+                }
+            }
+            val results = s.entries.map { symbolResult(api, s, it) }
+            DailyTrades.save(
+                context,
+                DailyTrades.DayRecord(
+                    s.sessionKey, s.startedAt, System.currentTimeMillis(), s.startEquity,
+                    endEquity, s.peakPct, s.reason, results
+                )
+            )
+            log(context, "오늘 기록을 일자별 매매 기록에 저장했습니다")
+        } catch (ex: Exception) {
+            log(context, "일자별 기록 저장 실패: ${ex.message ?: ex.javaClass.simpleName}")
+        }
+    }
+
+    /** The result of one symbol: exact from Binance's fills when possible, else estimated. */
+    private fun symbolResult(api: BinanceApi?, s: TradeState, e: TradeEntry): DailyTrades.SymbolResult {
+        val kind = when {
+            e.closed && e.exitReason.startsWith("개별 목표") -> "개별 목표 매도"
+            e.closed -> "수동 매도"
+            e.exitReason.isNotBlank() -> e.exitReason
+            else -> "보유 유지"
+        }
+        var exit = if (e.exitPrice > 0.0) e.exitPrice else e.lastPrice
+        var pnlUsdt = 0.0
+        var exact = false
+        if (api != null) {
+            try {
+                val from = e.time - 60_000L
+                val fills = api.userTrades(e.symbol, from).filter { it.time >= from }
+                val sells = fills.filter { it.side == "SELL" }
+                val sold = sells.sumOf { it.qty }
+                if (sold > 0.0) {
+                    exit = sells.sumOf { it.price * it.qty } / sold
+                    val fee = fills.filter { it.commissionAsset == "USDT" }.sumOf { it.commission }
+                    pnlUsdt = fills.sumOf { it.realizedPnl } - fee
+                    exact = true
+                }
+            } catch (_: Exception) {
+            }
+        }
+        val pct = if (e.entryPrice > 0.0 && exit > 0.0) (exit - e.entryPrice) / e.entryPrice * 100.0 else 0.0
+        return DailyTrades.SymbolResult(e.symbol, e.entryPrice, exit, pct, pnlUsdt, exact, kind, e.time)
+    }
+
     private fun beginLiquidation(context: Context, config: TradeConfig, s: TradeState, reason: String) {
         s.phase = Phase.LIQUIDATING
         s.reason = reason
@@ -360,8 +523,11 @@ object TradeEngine {
         }
         var allFlat = true
         for (e in s.entries) {
+            if (e.closed) continue
             try {
                 var amount = api.positionAmt(e.symbol)
+                // Already flat before we sold anything = the exchange's stop-loss closed it.
+                if (e.exitReason.isBlank()) e.exitReason = if (amount.signum() > 0) "종료 청산" else "손절 체결"
                 if (amount.signum() > 0) {
                     api.marketOrder(e.symbol, "SELL", plain(amount), s.hedge, true)
                     amount = api.positionAmt(e.symbol)
@@ -379,11 +545,16 @@ object TradeEngine {
                 logOnce(context, "liq_${e.symbol}", "${e.symbol} 청산 실패: ${ex.message ?: ex.javaClass.simpleName}", 60_000L)
             }
         }
-        if (!allFlat) return
+        if (!allFlat) {
+            saveState(context, s)
+            return
+        }
 
         var finalText = ""
+        var endEquity = s.startEquity * (1.0 + s.lastPct / 100.0)
         try {
             val equity = api.balanceUsdt().equity
+            endEquity = equity
             if (s.startEquity > 0.0) {
                 val pct = (equity - s.startEquity) / s.startEquity * 100.0
                 s.lastPct = pct
@@ -391,6 +562,7 @@ object TradeEngine {
             }
         } catch (_: Exception) {
         }
+        recordDay(context, api, s, endEquity)
         s.phase = Phase.ENDED
         saveState(context, s)
         val text = "청산 완료: ${s.reason}$finalText"
@@ -586,6 +758,7 @@ object TradeEngine {
         val targetPct: Double,
         val trailStartPct: Double,
         val trailDropPct: Double,
+        val symbolTargetPct: Double,
         val entries: List<TradeEntry>
     ) {
         /** 0 = not used, 1 = waiting (peak below the start), 2 = armed (working). */
@@ -606,7 +779,8 @@ object TradeEngine {
         val s = loadState(context) ?: return null
         return Progress(
             s.phase, s.reason, config.maxSlots, s.startEquity, s.slotUsdt, s.lastPct, s.peakPct,
-            s.updatedAt, config.targetPct, config.trailStartPct, config.trailDropPct, s.entries.toList()
+            s.updatedAt, config.targetPct, config.trailStartPct, config.trailDropPct,
+            config.symbolTargetPct, s.entries.toList()
         )
     }
 

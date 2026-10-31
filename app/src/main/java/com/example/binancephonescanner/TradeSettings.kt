@@ -30,7 +30,9 @@ data class TradeConfig(
     val maxSlots: Int,
     val targetPct: Double,
     val trailStartPct: Double,
-    val trailDropPct: Double
+    val trailDropPct: Double,
+    /** Each symbol is sold alone when its price is this % above its entry (0 = not used). */
+    val symbolTargetPct: Double = 0.0
 ) {
     fun windowText(): String = minText(startMin) + " ~ " + minText(endMin)
 }
@@ -110,7 +112,8 @@ object TradeSettings {
             maxSlots = p.getInt("max_slots", 10),
             targetPct = p.getString("target_pct", null)?.toDoubleOrNull() ?: DEFAULT_TARGET_PCT,
             trailStartPct = p.getString("trail_start_pct", null)?.toDoubleOrNull() ?: DEFAULT_TRAIL_START_PCT,
-            trailDropPct = p.getString("trail_drop_pct", null)?.toDoubleOrNull() ?: DEFAULT_TRAIL_DROP_PCT
+            trailDropPct = p.getString("trail_drop_pct", null)?.toDoubleOrNull() ?: DEFAULT_TRAIL_DROP_PCT,
+            symbolTargetPct = p.getString("symbol_target_pct", null)?.toDoubleOrNull() ?: 0.0
         )
     }
 
@@ -127,6 +130,7 @@ object TradeSettings {
             .putString("target_pct", config.targetPct.toString())
             .putString("trail_start_pct", config.trailStartPct.toString())
             .putString("trail_drop_pct", config.trailDropPct.toString())
+            .putString("symbol_target_pct", config.symbolTargetPct.toString())
             .apply()
     }
 

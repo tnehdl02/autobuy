@@ -11,6 +11,17 @@ import javax.crypto.spec.SecretKeySpec
 
 class BinanceApiException(val code: Int, message: String) : Exception(message)
 
+/** One fill of the account (from /fapi/v1/userTrades). */
+class TradeFill(
+    val side: String,
+    val price: Double,
+    val qty: Double,
+    val realizedPnl: Double,
+    val commission: Double,
+    val commissionAsset: String,
+    val time: Long
+)
+
 class Balance(val wallet: Double, val unrealized: Double, val available: Double) {
     val equity: Double get() = wallet + unrealized
 }
@@ -161,6 +172,44 @@ class BinanceApi(
             if (side == "BOTH" || side == "LONG") total = total.add(dec(o.optString("positionAmt", "0")))
         }
         return total
+    }
+
+    /** The account's fills of one symbol since [startTime] (epoch ms, at most 7 days back). */
+    fun userTrades(symbol: String, startTime: Long): List<TradeFill> {
+        val array = JSONArray(
+            request(
+                "GET", "/fapi/v1/userTrades",
+                mapOf("symbol" to symbol, "startTime" to startTime.toString(), "limit" to "1000"), true
+            )
+        )
+        val result = ArrayList<TradeFill>()
+        for (i in 0 until array.length()) {
+            val o = array.getJSONObject(i)
+            result.add(
+                TradeFill(
+                    o.optString("side"),
+                    o.optString("price", "0").toDoubleOrNull() ?: 0.0,
+                    o.optString("qty", "0").toDoubleOrNull() ?: 0.0,
+                    o.optString("realizedPnl", "0").toDoubleOrNull() ?: 0.0,
+                    o.optString("commission", "0").toDoubleOrNull() ?: 0.0,
+                    o.optString("commissionAsset"),
+                    o.optLong("time", 0L)
+                )
+            )
+        }
+        return result
+    }
+
+    /** Last price of every symbol in one call. */
+    fun lastPrices(): Map<String, Double> {
+        val array = JSONArray(request("GET", "/fapi/v1/ticker/price", emptyMap(), false))
+        val result = HashMap<String, Double>()
+        for (i in 0 until array.length()) {
+            val o = array.getJSONObject(i)
+            val price = o.optString("price", "").toDoubleOrNull() ?: continue
+            result[o.optString("symbol")] = price
+        }
+        return result
     }
 
     // ---- Trading ---------------------------------------------------------------------------
